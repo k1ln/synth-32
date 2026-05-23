@@ -1,0 +1,12 @@
+dependencies:
+  # Waveshare P4 BSP — covers display (ILI9881C MIPI-DSI), touch (GT911), audio, SD card
+  waveshare/esp32_p4_platform: "*"
+
+  # WiFi 6 via ESP32-C6 coprocessor over SDIO
+  espressif/esp_hosted: ">=2.12.8"
+  espressif/esp_wifi_remote: ">=1.4.0"
+
+  # LVGL graphics
+  lvgl/lvgl:
+    version: "9.4.*"
+    public: true
