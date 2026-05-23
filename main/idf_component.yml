@@ -8,5 +8,5 @@ dependencies:
 
   # LVGL graphics
   lvgl/lvgl:
-    version: "9.4.*"
+    version: ">=9.5.0"
     public: true

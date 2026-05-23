@@ -350,12 +350,12 @@ dependencies:
       type: idf
     version: 5.5.4
   lvgl/lvgl:
-    component_hash: 17e68bfd21f0edf4c3ee838e2273da840bf3930e5dbc3bfa6c1190c3aed41f9f
+    component_hash: 184e532558c1c45fefed631f3e235423d22582aafb4630f3e8885c35281a49ae
     dependencies: []
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 9.4.0
+    version: 9.5.0
   waveshare/esp32_p4_platform:
     component_hash: cc670622252743504f00d4095257172b8ba3f5e93cf199162baf90b443f39093
     dependencies:
@@ -517,6 +517,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - lvgl/lvgl
 - waveshare/esp32_p4_platform
-manifest_hash: 1b0481907b1c54b6bb03acb3780e74175a2909ce7b519bd12de8b2e2659a0e08
+manifest_hash: 6d2bcea89c2c5228a22030bdcca0f0b2b5236dba4f08f0cfc8830b1d1dfce97e
 target: esp32p4
 version: 2.0.0
