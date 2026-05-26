@@ -871,8 +871,8 @@ At 96 PPQN: 1 bar = 384 ticks. Loop lengths are always expressed in whole bars:
 
 ### 5.1 UI screen tree
 
-Every screen has a persistent **top bar** (40 px tall) showing BPM | PLAY | STOP | Song name | [MENU].
-The [MENU] button is always reachable from any screen.
+**Top bar is context-specific** — it shows only what is relevant to the current screen.
+SONG VIEW has the full transport bar. Detail screens replace it with a minimal bar: just [BACK] + screen title + one or two relevant controls. No BPM, no song name, no MENU clutter.
 
 ```
 ROOT
@@ -911,11 +911,29 @@ ROOT
 ```
 
 Navigation rules:
-- Every drill-down screen shows [<- BACK] in the top bar (left of BPM)
+- **SONG VIEW** is the root — full transport bar, no BACK button
+- **Detail screens** (drum grid, piano roll, WAV detail, FX chain, settings, etc.) show a minimal top bar: `[BACK]  <screen title>  <1–2 relevant controls>` — no BPM, no song name, no MENU
 - Audio keeps playing while navigating — edit a piano roll while the song plays
-- [<- BACK] from any editor returns to SONG VIEW without stopping playback
-- The MAIN MENU is a slide-up overlay (does not stop playback)
-- SONG VIEW is the only screen with no back button
+- [BACK] returns to the previous screen without stopping playback
+- The MAIN MENU is a slide-up overlay launched only from SONG VIEW's MENU button
+
+**Top bar contents per screen type:**
+
+| Screen | Top bar |
+|--------|---------|
+| SONG VIEW | `BPM · PLAY · STOP · SongName · LIVE · MASTER · MENU` |
+| DRUM GRID EDITOR | `[BACK]  Drums  [steps ▾]  [bars ▾]` |
+| PIANO ROLL EDITOR | `[BACK]  Bass  [synth type ▾]  [snap ▾]` |
+| WAV DETAIL | `[BACK]  (lane name)  [play mode ▾]` |
+| FX CHAIN EDITOR | `[BACK]  FX — (lane name)` |
+| SYNTH PARAMS | `[BACK]  (synth type name)` |
+| ARP EDITOR | `[BACK]  Arp — (lane name)` |
+| LIVE PLAY MODE | `[BACK]  LIVE` |
+| MASTER SECTION | `[BACK]  Master` |
+| SETTINGS | `[BACK]  Settings` |
+| SONG BROWSER | `[BACK]  Load Song` |
+| SOUND BROWSER | `[BACK]  Sounds` |
+| SAMPLE CUTTER | `[BACK]  Sample Cutter` |
 
 ### 5.2 Screen: SONG VIEW (main)
 
@@ -955,7 +973,7 @@ Navigation rules:
 Full-screen. All rows of the drum lane visible at once.
 
 ```
-+--BACK--BPM--PLAY--STOP--Drums--[16 steps v]--[2 bars v]--FX--MENU--------+
++--BACK--Drums-----------------------------[16 steps v]--[2 bars v]----------+
 |            | VOL | 1  2  3  4 | 5  6  7  8 | 9 10 11 12 |13 14 15 16   |
 |------------+-----+------------+------------+------------+---------------|
 | Kick    [+]| ███ | X  .  .  . | X  .  .  . | X  .  .  . | X  .  .  .  |
@@ -994,7 +1012,7 @@ Colors: off=dark grey, on=green, accented=yellow, playhead col=dim white overlay
 Full-screen. Scrollable horizontally (time) and vertically (pitch).
 
 ```
-+--BACK--BPM--PLAY--STOP--Bass--[SYNTH:Bass v]--[SNAP:1/16 v]--FX--MENU--+
++--BACK--Bass--------------------------------[SYNTH:Bass v]--[SNAP:1/16 v]--+
 |      |      bar 1                   |      bar 2                        |
 |  C5  |-------------------------------------------------------------------| 
 |  B4  |                              |                                   |
@@ -1040,7 +1058,7 @@ Tap [LIVE] from SONG VIEW. Song continues playing. Shows all active lanes as a s
 Each lane type gets a different interactive widget.
 
 ```
-+--BACK--BPM--PLAY--STOP--LIVE MODE-----------------------------------MENU--+
++--BACK--LIVE-------------------------------------------------------------+
 |                                                                            |
 |  DRUMS (lane 1)                                             [MU] [EDIT]   |
 |  +------+------+------+------+------+------+------+------+------+         |
@@ -1084,7 +1102,7 @@ WAV lane widget:
 Tap [MASTER] from SONG VIEW header.
 
 ```
-+--BACK--BPM--PLAY--STOP--MASTER----------------------------------MENU--+
++--BACK--Master-----------------------------------------------------------+
 |  VOLUME  [████████░░░░]  -3.0 dB                                      |
 |  PAN     [-------|-----]  0    (double-tap to center)                 |
 +------------------------------------------------------------------------+
@@ -2180,12 +2198,12 @@ function sliceToWav(audioBuffer, startSample, endSample, sampleRate) {
 - [ ] `song_new()` — blank song with defaults
 - [ ] `song_save(path)` — atomic write via .tmp + rename
 - [ ] `song_load(path)` — parse JSON, populate lanes
-- [ ] Dirty flag + `*` indicator in top bar
+- [ ] Dirty flag + `*` indicator in SONG VIEW song name (e.g. `MySong.s32 *`)
 - [ ] Test: save a song, reboot, reload it — all lanes identical
 
 ### M6 — Touch UI navigation + screens (3–4 sessions)
 - [ ] Refactor existing draw primitives into gfx.c
-- [ ] `ui_nav` screen stack: push/pop, persistent top bar with BACK + BPM + PLAY + STOP + MENU
+- [ ] `ui_nav` screen stack: push/pop; SONG VIEW renders full transport bar; all other screens render minimal bar (`[BACK] + title + 1–2 controls`)
 - [ ] SONG VIEW: 16 lane rows, scrollable, type badges, add lane button
 - [ ] MAIN MENU overlay: new/save/load/settings/about
 - [ ] SONG BROWSER screen: list .s32 files, load/delete/rename
