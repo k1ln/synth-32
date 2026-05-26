@@ -3,6 +3,7 @@
 ## Hardware Context
 
 - **Board**: Waveshare ESP32-P4 (dual-core 400 MHz RISC-V, ~768 KB SRAM, 32 MB PSRAM via Hex-SPIRAM 200 MHz)
+- **WiFi**: ESP32-C6 companion chip — handles all 802.11 WiFi; P4 has no native WiFi radio. Connected via SPI using Espressif's `esp_hosted` framework: C6 runs `esp_hosted` slave firmware, P4 runs standard IDF WiFi/socket/HTTP APIs as if WiFi were on-chip. All AP setup, HTTP server, WebSocket server, audio streaming, and SD card file uploads run on the P4 side transparently.
 - **Display**: MIPI-DSI HX8394 1280×720, RGB565, 3× framebuffers live in PSRAM (~5.25 MB)
 - **Audio**: ES8311 DAC/ADC via I2S, 48 kHz / 16-bit stereo
 - **Flash**: 8 MB (partitions.csv must account for SD as primary storage)
@@ -12,6 +13,27 @@
 ---
 
 ## Phase 0 — SD Card Infra & Delta Upload
+
+### 0.0 ESP32-C6 WiFi bring-up (esp_hosted)
+
+The P4 has no WiFi radio. The C6 companion chip provides it via SPI using Espressif's
+`esp_hosted` framework. This must work before any network feature can be tested.
+
+**C6 side (flash once):**
+- Flash the pre-built `esp_hosted` slave firmware onto the C6 (`idf.py -p <port> flash` from `esp-idf/examples/esp_hosted/slave`)
+- No custom C6 code needed — it runs as a transparent WiFi coprocessor
+
+**P4 side:**
+- Add `espressif/esp_hosted` to `idf_component.yml`
+- Configure SPI host, MOSI/MISO/CLK/CS pins, and handshake GPIO in `sdkconfig` / `Kconfig`
+- Confirm pin assignments don't conflict with MIPI-DSI, GT911 I2C (SDA/SCL), I2S, or SDMMC
+- After `esp_hosted` init, standard `esp_wifi_*` / `esp_netif_*` / `esp_http_server` APIs work identically to a WiFi-native chip — no code changes needed elsewhere
+
+**Verification steps:**
+1. P4 boots, `esp_hosted` initialises over SPI
+2. `esp_wifi_set_mode(WIFI_MODE_AP)` + `esp_wifi_start()` — AP `synth-32` appears on host
+3. Host connects, `http://192.168.4.1/` returns a test response
+4. WebSocket upgrade at `ws://192.168.4.1/ws` connects successfully
 
 ### 0.1 SD card driver
 - Add `esp_driver_sdmmc` or `esp_driver_sdspi` to `CMakeLists.txt` and `idf_component.yml`
@@ -61,6 +83,43 @@ The upload tool handles conversion on the host before transfer.
   - `PUT /sounds/upload` — streams body directly to SD card file (never buffers whole file in RAM; use `esp_http_server` chunked receive with 4 KB stack buffer)
   - `POST /sounds/commit` — atomically swaps new manifest
 - SHA256: use `mbedtls_md5` or `esp_sha` (hardware SHA on P4) — do it in streaming 4 KB chunks, zero heap overhead
+
+### 0.4a Mobile file upload to SD card
+
+Mobile clients (phone/tablet browser connected to `synth-32` AP) can upload audio files
+directly to the SD card from the web UI. No desktop or Python tool required.
+
+**Device HTTP handler:**
+- `POST /upload?path=<relative-dir>` — receives a `multipart/form-data` body (standard HTML file input), streams each file part directly to `/sdcard/<relative-dir>/<filename>` in 4 KB chunks. No full-file RAM buffer. Creates target directory if missing. Returns JSON `{"ok": true, "saved": ["file1.wav", ...]}`.
+- All paths jail-checked against `/sdcard/` — reject any `..` traversal.
+- Accepts WAV files only from mobile upload (reject other types with `400`); the delta upload tool (`upload_sounds.py`) handles FLAC/OGG/AIFF conversion on the host side as before.
+
+**Web UI — upload panel** (accessible from MENU → UPLOAD FILES):
+```
++-- UPLOAD FILES -----------------------------------------+
+|  Upload audio files to the synth's SD card              |
+|                                                          |
+|  Save to folder:  [sounds/MyKit          v]  [NEW FOLDER]|
+|                                                          |
+|  [  Choose Files  ]   (or drag & drop)                  |
+|                                                          |
+|  kick.wav          ████████████████░░░░  80%            |
+|  snare.wav         ██████████████████░░  90%            |
+|  hihat.wav         ████████████████████ done ✓           |
+|                                                          |
+|  [ UPLOAD ALL ]                                          |
++----------------------------------------------------------+
+```
+- Folder picker: `GET /sd/ls?path=sounds` lists existing kit folders; user can select one or type a new name
+- File picker: `<input type="file" accept=".wav" multiple>` — mobile shows camera roll / Files app
+- Each file uploads sequentially via `fetch()` with `FormData`; progress bar from `xhr.upload.onprogress`
+- On completion: sound browser refreshes kit list
+
+**New HTTP handlers needed:**
+| URL | What it does |
+|-----|-------------|
+| `POST /upload?path=<dir>` | Upload WAV file(s) to `/sdcard/<dir>/` |
+| `GET /sd/ls?path=<dir>` | List directory on SD card as JSON (folder picker) |
 
 ### 0.4b Manifest format
 ```json
@@ -188,8 +247,17 @@ typedef struct {
     uint16_t write_idx;
     uint16_t read_idx;
     uint16_t fill;              // frames available
-    bool     loop;              // repeat when end of file reached
     bool     active;
+
+    // Playback mode (mirrors sample_play_mode_t used in drum rows)
+    sample_play_mode_t play_mode;  // ONE_SHOT / LOOP / LOOP_PING / GATE / SLICE
+    uint32_t loop_start;   // byte offset of loop start in PCM data (0 = file start)
+    uint32_t loop_end;     // byte offset of loop end (0 = EOF)
+    uint32_t slice_start;  // SLICE mode: start byte
+    uint32_t slice_end;    // SLICE mode: end byte
+    bool     reverse;      // fill ring in reverse (read SD backwards)
+    float    pitch;        // semitone shift ±24, applied via resampler ratio
+    float    start_offset; // 0.0–1.0: initial playback position
 } stream_ring_t;
 ```
 - All `stream_ring_t` instances allocated in PSRAM via `heap_caps_malloc(…, MALLOC_CAP_SPIRAM)`
@@ -263,12 +331,58 @@ typedef struct {
 } lane_t;
 ```
 
-### 2.3 Loop length
-- Loop length in ticks: user sets in musical units (bars × beats × subdivisions)
-- Example: 4/4 at 96 PPQN → 1 bar = 384 ticks
-- **Per-lane, independently**: lane A can be 2 bars, lane B can be 3 bars — they drift naturally (polyrhythm)
-- When `lane_tick >= loop_len_ticks`: `lane_tick = 0` (WAV seeks to start; synth pattern resets)
-- Minimum resolution: 1 tick (~1 ms @ 120 BPM, 96 PPQN)
+### 2.3 Loop length & restart quantization
+
+Loop length in ticks: user sets in musical units (bars × beats × subdivisions).
+Example: 4/4 at 96 PPQN → 1 bar = 384 ticks.
+**Per-lane, independently**: lane A can be 2 bars, lane B can be 3 bars — they drift naturally (polyrhythm).
+Minimum resolution: 1 tick (~1 ms @ 120 BPM, 96 PPQN).
+
+**Two playback modes — LIVE vs SONG — determine loop restart behavior:**
+
+#### LIVE mode (default when [LIVE] is active)
+- Loop restarts **immediately** (`lane_tick = 0`) when `lane_tick >= loop_len_ticks`
+- Manual retrigger (tap pad / play button) also restarts immediately with no quantization
+- Purpose: live jamming, instant response, finger-drumming feel
+- `song_t.playback_mode == PLAYBACK_LIVE`
+
+#### SONG mode (SONG VIEW, composition)
+- Loop restarts **snap to the next bar boundary** of the master clock
+- When `lane_tick >= loop_len_ticks`: set `lane.pending_restart = true`; actual `lane_tick = 0` only fires when `master_tick % bar_ticks == 0`
+- If loop_len_ticks is already a whole number of bars (the common case) this is identical to immediate restart — no audible difference
+- Prevents polyrhythm drift when assembling a song; all lanes re-align on bar 1 after their own loop ends
+- `song_t.playback_mode == PLAYBACK_SONG`
+
+**Data model additions to `lane_t`:**
+```c
+bool     pending_restart;   // SONG mode: restart queued, fires on next bar boundary
+```
+
+**Data model additions to `song_t`:**
+```c
+typedef enum { PLAYBACK_LIVE, PLAYBACK_SONG } playback_mode_t;
+playback_mode_t playback_mode;   // toggled by [LIVE] button; persisted in .s32 file
+```
+
+**Audio tick engine change (section 2.4 step 2 / loop check):**
+```c
+// LIVE mode
+if (lane->lane_tick >= lane->loop_len_ticks) {
+    lane->lane_tick = 0;
+    // seek WAV / reset synth pattern
+}
+
+// SONG mode
+if (lane->lane_tick >= lane->loop_len_ticks)
+    lane->pending_restart = true;
+if (lane->pending_restart && (master_tick % bar_ticks == 0)) {
+    lane->pending_restart = false;
+    lane->lane_tick = 0;
+    // seek WAV / reset synth pattern
+}
+```
+
+`bar_ticks = ppqn * beats_per_bar` (e.g. 96 × 4 = 384 at 4/4).
 
 ### 2.4 Audio mix task (core 1)
 ```
@@ -309,15 +423,44 @@ typedef struct {
     bool     accent;     // louder hit (multiplied by accent_gain)
 } drum_step_t;
 
+typedef enum {
+    SAMPLE_PLAY_ONE_SHOT,    // play to EOF then stop (default)
+    SAMPLE_PLAY_LOOP,        // loop between loop_start and loop_end continuously
+    SAMPLE_PLAY_LOOP_PING,   // ping-pong: forward then backward between loop points
+    SAMPLE_PLAY_GATE,        // play while step is held (for tied steps); stop on note-off
+    SAMPLE_PLAY_SLICE,       // play only between slice_start and slice_end, then stop
+} sample_play_mode_t;
+
+#define MULTI_HIT_MAX  8   // max chained samples per row
+
 typedef struct {
     char        wav_path[128];              // sample for this row
     stream_ring_t *ring;                    // PSRAM ring, one per active row
+
+    // Playback mode
+    sample_play_mode_t play_mode;
+    uint32_t    loop_start;     // byte offset into PCM data for loop start point
+    uint32_t    loop_end;       // byte offset for loop end (0 = EOF)
+    uint32_t    slice_start;    // for SLICE mode: start byte
+    uint32_t    slice_end;      // for SLICE mode: end byte
+
+    // Multi-hit: chain of samples fired in quick succession on one trigger
+    uint8_t     multi_hit_count;            // 0 or 1 = normal; 2–8 = multi-hit chain
+    char        multi_wav[MULTI_HIT_MAX][128]; // paths for hits 2..N (hit 1 = wav_path)
+    uint16_t    multi_gap_ms[MULTI_HIT_MAX];   // gap in ms before each successive hit (0 = immediate)
+    stream_ring_t *multi_ring[MULTI_HIT_MAX];  // PSRAM rings pre-allocated for each slot
+    uint8_t     multi_idx;      // runtime: which hit is currently active
+    uint32_t    multi_next_tick;// runtime: tick when next hit fires
+
     drum_step_t  steps[DRUM_MAX_STEPS];    // the grid
-    uint8_t      step_count;               // active steps this row uses (= lane step_count)
-    float        volume;                   // row-level volume
+    uint8_t      step_count;
+    float        volume;
     float        pan;
+    float        pitch;         // semitone detune ±24 (applied via playback rate)
     bool         mute;
     bool         solo;
+    bool         reverse;       // play sample backwards
+    float        start_offset;  // 0.0–1.0: start position within sample (chop front)
 } drum_row_t;
 
 typedef struct {
@@ -328,6 +471,38 @@ typedef struct {
     float       accent_gain;       // multiplier for accented steps (default 1.5)
 } drum_seq_t;
 ```
+
+**Sample playback modes** (`sample_play_mode_t`):
+
+| Mode | Behaviour | Good for |
+|------|-----------|----------|
+| ONE_SHOT | Plays from start (or `start_offset`) to EOF, then stops | kick, snare, standard hits |
+| LOOP | Loops between `loop_start` and `loop_end` indefinitely until step retriggers or mute | hi-hat buzz, sustained hits, texture layers |
+| LOOP_PING | Ping-pong between loop points (forward → backward → forward) | metallic sweeps, smooth loops with no click at boundary |
+| GATE | Plays while the step is active; stops when the next step does not retrigger | sustained notes driven by tied steps |
+| SLICE | Plays only between `slice_start` and `slice_end` byte offsets, then stops | chop a long sample into addressable regions per row |
+
+Loop points are set in the row editor via a mini waveform view with draggable start/end handles (same approach as the sample cutter). Loop cross-fade (2–8 ms) is applied automatically to prevent clicks.
+
+**Multi-hit** (`multi_hit_count > 1`):
+
+Fire a rapid chain of samples on a single step trigger — each hit can be a different sample or the same sample repeated, with a configurable gap between them. The chain plays through automatically; no extra steps needed.
+
+Examples:
+- Flam: `multi_hit_count=2`, same snare sample, `multi_gap_ms[1]=8` → classic drum flam
+- Roll: `multi_hit_count=6`, same snare, `multi_gap_ms[1..5]=30` → snare roll in one step
+- Layered attack: `multi_hit_count=3`, different transients, gaps 0/5/12 ms → complex layered hit
+- Stutter: `multi_hit_count=4`, same sample at different `slice_start` offsets per hit → choppy stutter
+
+Multi-hit fires are scheduled ahead as `multi_next_tick` offsets computed at step trigger time. The audio task checks `multi_next_tick` each block and retriggers the next `multi_ring` in the chain when the tick arrives. All `multi_ring[]` are pre-allocated in PSRAM at lane load — no heap at trigger time.
+
+**Additional per-row parameters:**
+
+| Param | Range | Effect |
+|-------|-------|--------|
+| `pitch` | ±24 semitones | Shifts playback rate (tune sample up/down) |
+| `reverse` | bool | Plays sample backwards (pre-computed reverse in PSRAM ring fill) |
+| `start_offset` | 0.0–1.0 | Skip into sample before playing — chop the attack transient |
 
 **Step resolution options** (user-selectable per drum lane):
 
@@ -419,7 +594,7 @@ struct synth_inst_s {
 | ID | Name | Algorithm | Key params |
 |----|------|-----------|------------|
 | 0 | **Mono Wavetable** | 1 osc (square/saw/tri/sine/noise) + ADSR | waveform, tune, ADSR |
-| 1 | **Poly Wavetable** | 4-voice polyphonic wavetable | waveform, detune, ADSR |
+| 1 | **Poly Wavetable** | 5-voice polyphonic wavetable | waveform, detune, ADSR |
 | 2 | **Super Saw** | 7 detuned sawtooth oscillators summed | detune spread, stereo width, ADSR |
 | 3 | **FM Synth (2-op)** | Carrier + modulator, ratio, depth | ratio, depth, ADSR × 2 |
 | 4 | **FM Synth (4-op)** | 4 operators, DX7-style algorithms (8 presets) | algorithm, all op ADSR + levels |
@@ -439,14 +614,80 @@ struct synth_inst_s {
 | 18 | **Vowel Synth (Formant)** | 3 formant filters (bandpass cascade) | vowel A-E-I-O-U morphing |
 | 19 | **Bit-Crush Synth** | Wavetable + bit-depth & SR reduction | bits, rate |
 
+### Arpeggiator (per SYNTH lane)
+
+Each synth lane has a built-in arpeggiator that operates between the piano roll / live
+note-on events and the synth voice engine. When enabled it intercepts held notes and
+cycles through them (or a pattern derived from them) automatically in time with the clock.
+
+```c
+typedef enum {
+    ARP_UP,           // low → high
+    ARP_DOWN,         // high → low
+    ARP_UP_DOWN,      // low → high → low (no repeat at extremes)
+    ARP_UP_DOWN_INCL, // low → high → low (repeats extremes)
+    ARP_DOWN_UP,      // high → low → high
+    ARP_ORDER,        // note-on order (as played / placed)
+    ARP_RANDOM,       // random pick from held notes each step
+    ARP_CHORD,        // all held notes fire simultaneously (strum mode)
+    ARP_AS_PLAYED,    // replay in exact note-on sequence, with original durations
+} arp_mode_t;
+
+typedef struct {
+    bool        enabled;
+    arp_mode_t  mode;
+    uint8_t     octave_range;   // 1–4: cycle spreads notes across N octaves
+    uint8_t     step_div;       // clock divisions: 4=1/4, 8=1/8, 16=1/16, 32=1/32
+    bool        latch;          // hold notes after finger lifts until new note pressed
+    uint8_t     gate_pct;       // note duration as % of step (10–100 %)
+    uint8_t     velocity_mode;  // ORIGINAL=use note velocity; ACCENT=alternate; FIXED=constant
+    uint8_t     fixed_vel;      // velocity when velocity_mode=FIXED
+    bool        retrigger;      // retrigger envelope on each arp step
+    uint8_t     swing_pct;      // 50 = straight, 51–75 = swing (delay even steps)
+
+    // runtime state
+    uint8_t     held[16];       // held MIDI notes, insertion order
+    uint8_t     held_count;
+    uint8_t     seq[32];        // computed arp sequence from held notes + mode + octave_range
+    uint8_t     seq_len;
+    uint8_t     step;           // current position in seq[]
+    uint32_t    next_tick;      // clock tick of next arp step
+} arp_t;
+```
+
+**Arpeggiator modes in detail:**
+
+| Mode | Behaviour | Good for |
+|------|-----------|----------|
+| UP | C3 E3 G3 C4 E4 G4 (ascending across octave_range) | classic house/trance arps |
+| DOWN | G4 E4 C4 G3 E3 C3 | darker feel |
+| UP_DOWN | C3 E3 G3 C4 G3 E3 (no repeat at top) | evolving pads |
+| UP_DOWN_INCL | C3 E3 G3 C4 G3 E3 C3 (repeats C4) | bouncy |
+| ORDER | fires in note-on order regardless of pitch | tap in custom patterns |
+| RANDOM | random each step, never silences | chaotic textures |
+| CHORD | all notes at once → strummed with tiny delay between each | guitar strum feel |
+| AS_PLAYED | replays the exact sequence as placed in piano roll | quantised performance replay |
+
+**Octave range**: octave_range=1 stays in original octave; 2 adds the notes one octave up; 3 adds two octaves up; 4 adds three. Total sequence length = held_count × octave_range.
+
+**Latch**: when enabled, releasing all fingers keeps the current held set playing. New note-on clears the latch and starts a fresh set.
+
+**Swing**: delays every even-numbered arp step by `(step_duration * (swing_pct - 50) / 50)` ticks. At swing_pct=50 all steps are straight.
+
+**Integration with piano roll**: when arp is enabled and the lane has piano roll notes, the piano roll notes act as the "held" set — the arp fires them in sequence rather than playing them as written. When arp is disabled the piano roll plays normally.
+
+**UI**: arp panel in SYNTH LANE DETAIL (below piano roll), also accessible from web UI lane panel. Parameters: mode selector, octave range 1–4, step division, gate %, swing %, latch toggle, velocity mode.
+
 ### LFOs (shared, 4 per lane)
-- Shape: sine / triangle / square / sample-and-hold
-- Destinations: pitch, amplitude, filter cutoff, pan, FX param
-- Rate: Hz or sync to clock (1/4, 1/8, 1/16 …)
+- Shape: sine / triangle / square / saw / sample-and-hold
+- Destinations: pitch, amplitude, filter cutoff, pan, arp step division, FX param
+- Rate: Hz or sync to clock (1/4, 1/8, 1/16, 1/32 …)
 - All integer math: LFO phase is uint32_t, shape lookup in 256-entry table
+- LFO can modulate arp rate for evolving patterns
 
 ### Modulation matrix (per lane)
 - 4 sources (LFO1-4) × 8 destinations × depth float
+- Sources also include: velocity, note number, ADSR envelope output, random
 - Evaluated once per audio block (not per sample) to save CPU
 
 ---
@@ -456,16 +697,48 @@ struct synth_inst_s {
 ### 4.1 Effect node
 ```c
 typedef enum {
-    FX_DELAY, FX_REVERB, FX_COMPRESSOR,
-    FX_FILTER_LP, FX_FILTER_HP, FX_FILTER_BP,
-    FX_DISTORTION, FX_CHORUS, FX_FLANGER, FX_BITCRUSH,
-    FX_EQ3,
+    // Dynamics
+    FX_COMPRESSOR,          // RMS compressor
+    FX_LIMITER,             // brick-wall limiter (master chain essential)
+    FX_GATE,                // noise gate / transient gate
+
+    // Filters & EQ
+    FX_FILTER_LP,           // low-pass biquad
+    FX_FILTER_HP,           // high-pass biquad
+    FX_FILTER_BP,           // band-pass biquad
+    FX_FILTER_NOTCH,        // notch (band-reject) biquad
+    FX_EQ3,                 // 3-band: low shelf / mid peak / high shelf
+    FX_EQ5,                 // 5-band parametric EQ
+
+    // Distortion / saturation
+    FX_DISTORTION,          // drive + tone; selectable soft/hard/tube/fuzz modes
+    FX_OVERDRIVE,           // soft asymmetric clip (warm, amp-style)
+    FX_WAVEFOLD,            // wavefolder — folds signal back on itself (metallic/harsh)
+    FX_BITCRUSH,            // bit-depth + sample-rate reducer
+
+    // Time / space
+    FX_DELAY,               // stereo delay, clock-syncable
+    FX_REVERB,              // Freeverb (room/hall/plate size)
+    FX_CHORUS,              // 3-tap LFO delay chorus
+    FX_FLANGER,             // short LFO delay + feedback flanger
+    FX_PHASER,              // 4-stage all-pass phaser with LFO sweep
+
+    // Pitch / modulation
+    FX_TREMOLO,             // LFO amplitude modulation
+    FX_VIBRATO,             // LFO pitch modulation (delay-line based)
+    FX_RING_MOD,            // ring modulator — multiply signal by sine carrier
+    FX_PITCH_SHIFT,         // pitch shift ±24 semitones (granular, no time-stretch)
+
+    // Utility
+    FX_PAN_AUTO,            // LFO auto-pan left↔right
+    FX_STEREO_WIDTH,        // mid/side width control (mono-ise or widen)
+    FX_TRANSIENT_SHAPER,    // independent attack/sustain control (punch drums)
 } fx_type_t;
 
 typedef struct {
     fx_type_t type;
     bool      enabled;
-    float     wet;    // 0.0 – 1.0
+    float     wet;    // 0.0 – 1.0 (dry/wet mix)
     void     *state;  // allocated in PSRAM
     void    (*process)(void *state, int32_t *l, int32_t *r, int n);
     void    (*set_param)(void *state, uint8_t id, float v);
@@ -503,27 +776,71 @@ typedef struct {
 - Applied after per-lane FX chain, before master bus accumulation:
   `lane_bus *= lane_adsr.level`
 
-### 4.3 Per-lane effects (per-lane FX chain, max 6 in series, expanded with 32 MB PSRAM)
-- **ADSR** (see 4.2 above — always present, not a chain slot; chain slots are below)
-- **Filter LP/HP/BP**: 2-pole biquad (Chamberlin SVF); params: cutoff (20–20k Hz), resonance Q (0.5–20)
-  - State: `int32_t d1, d2` — 8 bytes; all int32 math
-- **Delay**: circular buffer in PSRAM; full 2 sec stereo (768 KB per lane) — all 16 supported
-  - Params: time (ticks or ms), feedback (0–0.95), wet
-  - Clock-sync: time = N/M beats (1/16 to 4 bars)
-- **Reverb**: Freeverb algorithm (8 comb + 4 allpass); ~32 KB state in PSRAM per instance
-  - Params: room size, damping, wet, width
-- **Compressor**: RMS detector + gain computer; runs at block rate
-  - Params: threshold, ratio, attack ms, release ms, makeup gain
-- **Distortion**: soft-clip waveshaper (polynomial) or hard-clip + tone filter
-  - Params: drive, tone
-- **Chorus**: 3-tap delay modulated by LFO; ~12 KB state in PSRAM
-- **Flanger**: short delay (1–15 ms) + LFO; ~6 KB state in PSRAM
-- **Bit-Crush**: reduce bit depth + sample rate; integer only
-- **EQ 3-band**: low shelf / mid peak / high shelf biquad; 3 x biquad state
+### 4.3 Per-lane effects (per-lane FX chain, max 6 in series)
+
+ADSR is always present and is not a chain slot — see section 4.2. All FX slots below.
+
+#### Dynamics
+
+| Effect | Algorithm | Params | State (PSRAM) |
+|--------|-----------|--------|---------------|
+| **Compressor** | RMS detector + gain computer, runs at block rate | threshold dBFS, ratio, attack ms, release ms, makeup gain dB | ~64 B |
+| **Limiter** | Lookahead brick-wall; 2 ms lookahead delay | ceiling dBFS, release ms | ~4 KB (lookahead buffer) |
+| **Gate** | RMS threshold gate with hysteresis | threshold dBFS, attack ms, hold ms, release ms | ~32 B |
+| **Transient Shaper** | Independent fast/slow envelope follower difference | attack gain dB (+/-), sustain gain dB (+/-) | ~64 B |
+
+#### Filters & EQ
+
+| Effect | Algorithm | Params | State (PSRAM) |
+|--------|-----------|--------|---------------|
+| **Filter LP** | 2-pole biquad (Chamberlin SVF), 12 dB/oct | cutoff 20–20k Hz, resonance Q 0.5–20 | 16 B |
+| **Filter HP** | Same | cutoff, Q | 16 B |
+| **Filter BP** | Same | cutoff, Q | 16 B |
+| **Filter Notch** | Band-reject biquad | cutoff, Q | 16 B |
+| **EQ 3-band** | Low shelf + mid peak + high shelf, all biquad | low freq/gain, mid freq/Q/gain, high freq/gain | 48 B |
+| **EQ 5-band** | 5 fully parametric bands, each biquad | per band: freq, Q, gain dB; global bypass | 80 B |
+
+#### Distortion & Saturation
+
+| Effect | Algorithm | Params | State (PSRAM) | Notes |
+|--------|-----------|--------|---------------|-------|
+| **Distortion** | Selectable waveshaper: soft-clip (polynomial `x - x³/3`), hard-clip, tube (`tanh`), fuzz (full-wave rect) | drive 0–100, tone (HP before clip, LP after), mode, wet | ~32 B | Good on synth leads, bass |
+| **Overdrive** | Asymmetric soft-clip — positive half `tanh`, negative half cubic; adds even harmonics | drive, level | ~16 B | Warm amp character; good on bass/chords |
+| **Wavefolder** | Clips signal then mirrors it back inward repeatedly; Buchla-style | fold depth, symmetry | ~16 B | Metallic, bell-like overtones; excellent on pads |
+| **Bit-Crush** | Quantise to N bits (1–16), then downsample by integer factor M | bit depth 1–16, sample rate divider 1–32 | ~16 B | Lo-fi, game sounds, glitch |
+
+#### Time & Space
+
+| Effect | Algorithm | Params | State (PSRAM) |
+|--------|-----------|--------|---------------|
+| **Delay** | Stereo circular buffer in PSRAM, ping-pong option | time ms or clock-sync (1/16–4 bars), feedback 0–0.95, ping-pong on/off, wet | 768 KB (2 sec stereo) |
+| **Reverb** | Freeverb: 8 comb + 4 all-pass filters | room size, damping, wet, stereo width | ~32 KB |
+| **Chorus** | 3-tap delay (25–35 ms) modulated by sine LFO; summed | rate Hz, depth ms, wet | ~12 KB |
+| **Flanger** | 1-tap short delay (1–15 ms) + LFO + feedback | rate Hz, depth, feedback, wet | ~6 KB |
+| **Phaser** | 4-stage all-pass chain, LFO sweeps notch frequency | rate Hz, depth, feedback, wet | ~64 B |
+
+#### Modulation
+
+| Effect | Algorithm | Params | State (PSRAM) |
+|--------|-----------|--------|---------------|
+| **Tremolo** | LFO multiplied onto amplitude | rate Hz (0.1–20), depth, LFO shape (sine/square/saw) | ~32 B |
+| **Vibrato** | LFO-modulated short delay line (pitch wobble) | rate Hz, depth semitones (0–2) | ~2 KB |
+| **Ring Modulator** | Sample × sine carrier oscillator; creates sum/difference sidebands | carrier freq Hz (1–5000), wet | ~16 B |
+| **Pitch Shift** | Granular pitch shift, no time-stretch; suitable for static or slow signals | semitones ±24, grain size ms | ~32 KB |
+
+#### Utility
+
+| Effect | Algorithm | Params | State (PSRAM) |
+|--------|-----------|--------|---------------|
+| **Auto-Pan** | LFO sweeps pan position L↔R | rate Hz, depth, LFO shape | ~16 B |
+| **Stereo Width** | Mid/side encode → scale sides → decode | width 0–200% (0=mono, 100=unchanged, 200=max) | ~16 B |
 
 ### 4.4 Master effects chain (max 6 in series)
-- Same fx_node_t type; operates on master bus after all lanes are mixed
+- Same `fx_node_t` type; operates on master bus after all lanes are mixed
 - Master bus: `int32_t[AUDIO_BUF_FRAMES * 2]` in PSRAM — allocated once
+- All per-lane effects are available on master too
+- Typical master chain: `EQ5 → Compressor → Stereo Width → Limiter`
+- Limiter should always be the last slot to prevent digital clipping before I2S write
 
 ### 4.5 Effect routing
 ```
@@ -1033,12 +1350,12 @@ reverb instances, web streaming buffers, and the full web UI asset cache fit com
 | 16x piano_roll_t (512 notes x 10B each, expanded) | PSRAM | 80 KB |
 | Delay buffers (16 lanes, full 2-sec stereo = 768 KB each) | PSRAM | 12 MB |
 | Reverb state (16 active, 32 KB each) | PSRAM | 512 KB |
-| ADSR state (16 lanes x 8 voices x 32B each) | PSRAM | 4 KB |
-| Audio stream encode rings (4 WS clients, 16 KB each) | PSRAM | 64 KB |
+| ADSR state (16 lanes x 5 voices x 32B each) | PSRAM | ~2.5 KB |
+| Audio stream encode ring (1 client, 8 KB) | PSRAM | 8 KB |
 | Web UI static assets (HTML/JS/CSS, gzip-compressed) | PSRAM on boot | ~256 KB |
 | Master mix bus (1024 frames x 8B) | PSRAM | 8 KB |
 | WebSocket message queue (per client, 4 KB each, 4 clients) | PSRAM | 16 KB |
-| Synth voice state (20 types x 8 voices x ~128B) | SRAM | 20 KB |
+| Synth voice state (20 types x 5 voices x ~128B) | SRAM | ~12.5 KB |
 | Audio output buffer (512 frames x 4B) | SRAM (DMA-capable) | 4 KB |
 | FX biquad state | SRAM | < 1 KB |
 | SD file handles (16 open max) | SRAM | < 4 KB |
@@ -1046,8 +1363,8 @@ reverb instances, web streaming buffers, and the full web UI asset cache fit com
 | **Total SRAM used** | | **~30 KB** |
 | **PSRAM headroom** | | **~13.5 MB free** |
 
-No mitigations required. All 16 delay lines at 2 sec, all 16 reverbs active, 4 concurrent
-web clients each receiving audio streams -- all run simultaneously with room to spare.
+No mitigations required. All 16 delay lines at 2 sec, all 16 reverbs active, single
+audio stream client — all run simultaneously with room to spare.
 
 ---
 
@@ -1253,39 +1570,63 @@ void ws_notify_change(ws_msg_type_t type, int idx) {
 
 ### 8.3 Audio streaming over WebSocket
 
-When a mobile client sends `WS_CMD_AUDIO_STREAM` with `enable=1`:
+**Single audio client at a time.** When a client sends `WS_CMD_AUDIO_STREAM enable=1`:
 
-1. Device allocates a 16 KB encode ring in PSRAM for that client
-2. After each I2S audio block is written, the same `int16_t` stereo samples are
-   also queued into the client's encode ring
-3. A dedicated `ws_audio_task` (core 0, priority 8) encodes and sends:
-   - **Format**: 16-bit PCM, stereo, 48 kHz, raw binary (no container)
-   - **Frame size**: 512 frames = 2048 bytes per WebSocket binary frame
-   - **Latency**: ~10.7 ms per frame at 48 kHz
-   - No compression — 32 MB PSRAM and WiFi (up to 20 Mbps on AP) are sufficient
-   - Bandwidth per client: 48000 x 2ch x 2B = ~1.5 Mbps; 4 clients = ~6 Mbps (within AP limit)
+1. If another client currently holds the audio stream, drop it immediately: free its encode ring, clear its audio flag, send it `WS_MSG_AUDIO_DROPPED` so it can update its UI.
+2. Allocate a single 8 KB encode ring in PSRAM for the new client.
+3. After each I2S audio block is written, copy the `int16_t` stereo samples into the ring.
+4. A dedicated `ws_audio_task` (core 0, priority 8) drains the ring and sends:
+   - **Format**: 16-bit PCM, stereo, 48 kHz, little-endian, raw binary (no container)
+   - **Frame size**: 256 frames = 1024 bytes per WebSocket binary frame
+   - **Latency contribution**: ~5.3 ms per frame at 48 kHz — small packets reduce WiFi jitter impact on mobile Web Audio scheduling
+   - No compression — PCM first; Opus only if WiFi proves lossy in practice
+   - Bandwidth: 48000 × 2ch × 2B = ~1.5 Mbps (single client, within AP limit)
 
-**Device speaker mute when any audio client is active:**
+Add to `ws_msg_type_t`:
+```c
+WS_MSG_AUDIO_DROPPED = 0x0F,  // server dropped this client's audio stream (new client took it)
+```
+
+**Device speaker mute while audio client is active:**
 ```c
 // In audio task, after I2S write:
-bool any_audio_client = (s_audio_stream_mask != 0);
-if (any_audio_client) {
-    gpio_set_level(GPIO_PA, 0);  // mute PA amplifier
-    i2s_channel_write(...);      // I2S still clocks (codec needs it) but PA is off
+if (s_audio_client_fd >= 0) {
+    gpio_set_level(GPIO_PA, 0);  // mute PA — phone is the speaker
+    // copy block into encode ring
 } else {
-    gpio_set_level(GPIO_PA, 1);  // PA on
-    i2s_channel_write(...);
+    gpio_set_level(GPIO_PA, 1);  // PA on — no wireless listener
 }
 ```
-- `s_audio_stream_mask`: bitmask of which of the 4 WS slots are streaming audio
-- PA is re-enabled immediately when last audio client disconnects or sends `enable=0`
-- The device display still shows the UI and all controls remain responsive
+- `s_audio_client_fd`: fd of the single active audio client, or -1 if none
+- PA re-enabled immediately when client disconnects or sends `enable=0`
+- All controls, touch UI, and other WS clients remain fully responsive
 
-**Multiple clients:**
-- Each client independently chooses audio on/off
-- If client A has audio=on and client B has audio=off: PA is muted, client A gets stream
-- If all clients disconnect: PA re-enabled automatically via WS disconnect callback
-- Max 4 simultaneous audio streams (limited by PSRAM ring allocation and WiFi bandwidth)
+**Client-side (Web Audio API, JS):**
+```js
+// Receive binary PCM frames and schedule them gap-free
+const SAMPLE_RATE = 48000;
+const SCHED_AHEAD_S = 0.10;  // 100 ms scheduling buffer — tune down to ~50 ms if mobile is stable
+let nextPlayAt = 0;
+
+ws.onmessage = (e) => {
+    if (!(e.data instanceof ArrayBuffer)) return;
+    const pcm = new Int16Array(e.data);          // 256 stereo frames = 512 int16 values
+    const frames = pcm.length / 2;
+    const buf = audioCtx.createBuffer(2, frames, SAMPLE_RATE);
+    const L = buf.getChannelData(0), R = buf.getChannelData(1);
+    for (let i = 0; i < frames; i++) {
+        L[i] = pcm[i * 2]     / 32768;
+        R[i] = pcm[i * 2 + 1] / 32768;
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    if (nextPlayAt < now + 0.005) nextPlayAt = now + 0.005;  // resync if we fell behind
+    src.start(nextPlayAt);
+    nextPlayAt += frames / SAMPLE_RATE;
+};
+```
 
 ### 8.4 WebSocket server implementation
 
@@ -1641,6 +1982,98 @@ esp_err_t web_ui_get_handler(httpd_req_t *req) {
 }
 ```
 
+### 9.8 Sample cutter (web tool)
+
+A dedicated screen in the web UI for cutting regions out of a WAV file already on the SD
+card and saving each cut as a new individual WAV in a named folder on the SD card.
+Accessible from MENU → SAMPLE CUTTER.
+
+**Use case**: you have a long audio file (a drum loop, a recorded jam, a field recording)
+on the SD card and want to slice it into individual one-shots or loops.
+
+**Screen layout:**
+```
++-- SAMPLE CUTTER ------------------------------------------+
+|  Source:  [sounds/MyKit/loop.wav          ] [BROWSE]       |
+|  Save to: [sounds/MyKit-cuts/             ] [NEW FOLDER]   |
++-----------------------------------------------------------+
+|                                                           |
+|  [PLAY]  [STOP]  ◄ 0:00.000          1:23.456 ►          |
+|                                                           |
+|  ████████████████████████████████████████████████████     |
+|  ▲ waveform (canvas, full file width, zoomable)           |
+|  |                                                        |
+|  ├──[  ]────────────[  ]──  region handles (draggable)   |
+|                                                           |
+|  Regions:                                                 |
+|  #  | Start    | End      | Duration | Name      |       |
+|  1  | 0:00.000 | 0:01.234 | 1.234s   | cut-001   | [▶][✕]|
+|  2  | 0:01.500 | 0:02.800 | 1.300s   | cut-002   | [▶][✕]|
+|  3  | 0:04.000 | 0:05.100 | 1.100s   | cut-003   | [▶][✕]|
+|                                                           |
+|  [ + ADD REGION ]   [ SAVE ALL CUTS ]                     |
++-----------------------------------------------------------+
+```
+
+**Workflow:**
+1. User picks a source WAV from the SD card (`GET /sd/ls` to browse)
+2. Device streams the WAV to the browser via `GET /sd?path=<file>` — decoded with Web Audio `decodeAudioData()`
+3. Browser draws the waveform on a canvas (peaks downsampled to canvas pixel width)
+4. User adds regions by clicking/dragging on the waveform canvas; each region has a start and end handle
+5. Each region can be previewed (played in-browser using the decoded AudioBuffer slice)
+6. User names the output folder; clicks [SAVE ALL CUTS]
+7. Browser slices the AudioBuffer per region, re-encodes each slice as a 16-bit WAV using a small inline WAV writer (no library), and uploads each via `POST /upload?path=<folder>`
+8. Device saves each to `/sdcard/<folder>/<name>.wav` — immediately available in the sound browser
+
+**WAV encoding (in-browser, no library):**
+```javascript
+function sliceToWav(audioBuffer, startSample, endSample, sampleRate) {
+    const numFrames = endSample - startSample;
+    const numChannels = audioBuffer.numberOfChannels;
+    const byteLength = 44 + numFrames * numChannels * 2;
+    const buf = new ArrayBuffer(byteLength);
+    const view = new DataView(buf);
+    // write RIFF WAV header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, byteLength - 8, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);          // chunk size
+    view.setUint16(20, 1, true);           // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * 2, true); // byte rate
+    view.setUint16(32, numChannels * 2, true);              // block align
+    view.setUint16(34, 16, true);                           // bits per sample
+    writeString(view, 36, 'data');
+    view.setUint32(40, numFrames * numChannels * 2, true);
+    // write interleaved int16 samples
+    let offset = 44;
+    for (let i = startSample; i < endSample; i++) {
+        for (let c = 0; c < numChannels; c++) {
+            const s = Math.max(-1, Math.min(1, audioBuffer.getChannelData(c)[i]));
+            view.setInt16(offset, s < 0 ? s * 32768 : s * 32767, true);
+            offset += 2;
+        }
+    }
+    return buf;
+}
+```
+
+**New HTTP handler needed:**
+- `GET /sd?path=<relative>` — download a file from `/sdcard/<relative>` (stream to browser for decoding). Path jail-checked. Used only for sample cutter source file fetch; not a general file manager.
+
+**New URL additions:**
+| URL | What it does |
+|-----|-------------|
+| `GET /sd?path=<p>` | Download a single file from SD card (sample cutter source fetch) |
+
+**Notes:**
+- All slicing and WAV encoding happens in the browser — zero device CPU cost
+- The device only serves the source file once and receives the cut files via `POST /upload`
+- Large source files (e.g. 50 MB) download fully before the waveform draws; show a progress bar during fetch
+- Output sample rate matches source; no resampling
+
 ---
 
 ## Implementation Order (Milestones)
@@ -1648,12 +2081,16 @@ esp_err_t web_ui_get_handler(httpd_req_t *req) {
 ### M0 — SD + Upload + mDNS (1–2 sessions)
 - [ ] Add SD card driver and FAT mount
 - [ ] Implement manifest + delta upload over WiFi
+- [ ] `POST /upload?path=<dir>` — multipart WAV upload, stream to SD, no RAM buffering
+- [ ] `GET /sd/ls?path=<dir>` — directory listing as JSON (for folder picker + sample cutter browser)
+- [ ] `GET /sd?path=<p>` — single file download from SD (for sample cutter source fetch)
 - [ ] mDNS init: register `synth-32.local`, `synth.local`, `synth32.local`
 - [ ] Captive portal: minimal DNS responder on UDP:53 returning device IP for all queries;
       HTTP catch-all handler redirecting unknown hosts to `http://synth-32.local/`
 - [ ] Test: join AP on iPhone/Android -> captive popup -> taps -> opens (future) web UI
 - [ ] Test: `http://synth-32.local`, `http://synth.local`, `http://synth32.local` all resolve
 - [ ] Test: upload a single kit via `upload_sounds.py` using IP fallback
+- [ ] Test: upload a WAV file from mobile browser via `POST /upload`
 
 ### M1 — WAV streaming (1–2 sessions)
 - [ ] WAV header parser (`wav_open`)
@@ -1669,35 +2106,72 @@ esp_err_t web_ui_get_handler(httpd_req_t *req) {
 - [ ] Volume + pan per lane
 - [ ] Test: 4 WAV lanes at different loop lengths
 
-### M2b — Drum sequencer (1 session)
+### M2b — Drum sequencer (2 sessions)
 - [ ] `drum_seq_t` data model + step trigger in audio task
 - [ ] Per-row stream ring retrigger on step hit
 - [ ] Velocity scaling per step
 - [ ] Accent multiplier
 - [ ] Resolution change (8/16/32/64) with step remap
+- [ ] Sample playback modes: ONE_SHOT, LOOP, LOOP_PING, GATE, SLICE
+- [ ] Loop points: `loop_start` / `loop_end` byte offsets; 2–8 ms cross-fade to prevent clicks
+- [ ] Ping-pong: SD stream task reads forward then backward between loop points
+- [ ] Reverse playback: fill ring in reverse order from SD
+- [ ] Pitch shift per row: adjust resampler ratio from semitone value
+- [ ] Start offset per row: seek to `start_offset` fraction of PCM data on trigger
+- [ ] Multi-hit: `multi_hit_count` chains, per-hit WAV path + gap_ms; schedule via `multi_next_tick`
+- [ ] Pre-allocate all `multi_ring[]` in PSRAM at lane load; no alloc at trigger time
 - [ ] Test: 4-row drum pattern at 120 BPM, 16 steps, loops correctly
+- [ ] Test: flam (2-hit, 8 ms gap); snare roll (6-hit, 30 ms gaps); reverse kick; pitch-shifted hi-hat
+- [ ] Test: LOOP mode hi-hat buzzes continuously; LOOP_PING has no click at boundary
 
-### M3 — Synth instruments + piano roll engine (2–3 sessions)
+### M3 — Synth instruments + piano roll + arpeggiator (2–3 sessions)
 - [ ] Synth vtable interface
 - [ ] Implement types 0–5 (wavetable, supersaw, FM, subtractive)
 - [ ] Implement types 6–11 (KS, bell, pad, noise, bass, lead)
 - [ ] Implement types 12–19 (chord, drums, organ, wavetable morph, vowel, bitcrush)
-- [ ] LFO system
+- [ ] LFO system (sine/tri/square/saw/S&H, Hz or clock-sync, modulation matrix)
 - [ ] `piano_roll_t` data model + note event playback in audio task (sorted scan)
 - [ ] Snap grid quantization
+- [ ] **Arpeggiator** (`arp_t`): modes UP/DOWN/UP_DOWN/UP_DOWN_INCL/ORDER/RANDOM/CHORD/AS_PLAYED
+- [ ] Arp octave range 1–4, step division (4/8/16/32), gate %, latch toggle
+- [ ] Arp swing: delay even steps by swing_pct offset
+- [ ] Arp velocity modes: ORIGINAL / ACCENT (alternate) / FIXED
+- [ ] Arp retrigger: re-gate ADSR envelope on each arp step
+- [ ] Arp + piano roll integration: piano roll notes act as held set when arp enabled
 - [ ] Test: piano roll drives synth through a 2-bar melody, loops correctly
+- [ ] Test: arp UP mode, 2 octaves, 1/16 steps, latch on — stable repeating pattern
+- [ ] Test: arp RANDOM mode; CHORD mode fires all notes at once; swing at 62 % audible
 
-### M4 — Effects + ADSR (1–2 sessions)
+### M4 — Effects + ADSR (2–3 sessions)
 - [ ] Per-lane ADSR engine (`adsr.c`): attack/decay/sustain/release, computed per block
 - [ ] ADSR gate: opens on lane play, closes on stop; re-triggers on loop restart
 - [ ] ADSR serialised in song JSON (attack_ms, decay_ms, sustain, release_ms per lane)
-- [ ] biquad filter (LP/HP/BP) per lane
-- [ ] Delay with clock sync (full 2-sec stereo, all 16 lanes — PSRAM allows it)
-- [ ] Reverb (Freeverb, all 16 simultaneous instances)
-- [ ] Compressor
-- [ ] Distortion, chorus, EQ
-- [ ] Master FX chain
-- [ ] Test: lane with ADSR fade-in → delay → reverb → master compressor
+- [ ] `fx.c` / `fx.h`: `fx_node_t` vtable, `fx_chain_process()`, `fx_chain_set_param()`
+- [ ] **Filters**: LP / HP / BP / Notch biquad (Chamberlin SVF, int32)
+- [ ] **EQ 3-band**: low shelf + mid peak + high shelf
+- [ ] **EQ 5-band**: 5 fully parametric biquad bands
+- [ ] **Compressor**: RMS + gain computer, block-rate
+- [ ] **Limiter**: brick-wall lookahead (2 ms), master chain essential
+- [ ] **Gate**: RMS threshold with hysteresis, hold time
+- [ ] **Transient Shaper**: fast/slow envelope follower difference for attack/sustain control
+- [ ] **Distortion**: drive + tone, modes: soft-clip / hard-clip / tube (tanh) / fuzz
+- [ ] **Overdrive**: asymmetric soft-clip (warm, even harmonics)
+- [ ] **Wavefolder**: Buchla-style fold-back waveshaper
+- [ ] **Bit-Crush**: bit-depth quantiser + sample-rate divider
+- [ ] **Delay**: stereo circular buffer in PSRAM, ping-pong, clock-sync (1/16–4 bars)
+- [ ] **Reverb**: Freeverb (8 comb + 4 allpass), room/damping/width
+- [ ] **Chorus**: 3-tap LFO delay
+- [ ] **Flanger**: short LFO delay + feedback
+- [ ] **Phaser**: 4-stage all-pass LFO sweep
+- [ ] **Tremolo**: LFO amplitude modulation
+- [ ] **Vibrato**: LFO pitch modulation via delay line
+- [ ] **Ring Modulator**: × sine carrier, sum/difference sidebands
+- [ ] **Pitch Shift**: granular ±24 semitones
+- [ ] **Auto-Pan**: LFO L↔R sweep
+- [ ] **Stereo Width**: mid/side width control
+- [ ] Master FX chain (same node type, operates post-mix)
+- [ ] Test: lane with ADSR fade-in → Overdrive → Delay → Reverb → master EQ5 → Compressor → Limiter
+- [ ] Test: Distortion all 4 modes audible; Wavefolder adds metallic overtones; Bit-Crush degrades correctly
 
 ### M5 — Song save / load / settings (1 session)
 - [ ] cJSON dependency added to idf_component.yml
@@ -1738,12 +2212,14 @@ esp_err_t web_ui_get_handler(httpd_req_t *req) {
 - [ ] Test: open two browser tabs + touch screen simultaneously; all stay in sync
 
 ### M8 — Audio streaming over WebSocket (1 session)
-- [ ] `ws_audio.c`: per-client encode ring in PSRAM (16 KB each)
-- [ ] After I2S write: copy block into all active client rings
-- [ ] `ws_audio_task` (core 0, priority 8): drain rings, send binary WS frames (512 frames = 2048 bytes)
-- [ ] `WS_CMD_AUDIO_STREAM enable` handling: allocate/free client ring, set PA mute flag
-- [ ] PA GPIO muted whenever `s_audio_stream_mask != 0`; re-enabled on last client disconnect
+- [ ] `ws_audio.c`: single encode ring in PSRAM (8 KB); `s_audio_client_fd` (-1 = no client)
+- [ ] `WS_CMD_AUDIO_STREAM enable=1`: drop existing audio client if any (send `WS_MSG_AUDIO_DROPPED`, free ring), then claim slot for new client
+- [ ] `WS_CMD_AUDIO_STREAM enable=0` / disconnect: free ring, set `s_audio_client_fd = -1`, re-enable PA
+- [ ] After I2S write: if client active, copy block into encode ring
+- [ ] `ws_audio_task` (core 0, priority 8): drain ring, send binary WS frames (256 frames = 1024 bytes raw PCM)
+- [ ] PA GPIO muted while `s_audio_client_fd >= 0`; re-enabled on release
 - [ ] Test: phone connects, enables audio, device speaker mutes, phone plays audio in sync
+- [ ] Test: second phone connects with audio=1, first phone gets `WS_MSG_AUDIO_DROPPED`, second takes over
 
 ### M9 — Web UI (2–3 sessions)
 - [ ] `tools/web/index.html`: single-file vanilla JS/CSS web app
@@ -1764,24 +2240,36 @@ esp_err_t web_ui_get_handler(httpd_req_t *req) {
 - [ ] Audio gap-free playback with 100 ms Web Audio scheduling buffer
 - [ ] Test: full round-trip — edit drum beat in browser while device screen shows live sync
 
-### M10 — Polish + tuning (1 session)
-- [ ] CPU profiling: audio task < 60% core 1 at 120 BPM, 16 lanes, 4 WS audio clients
+### M10 — Mobile upload + sample cutter (1–2 sessions)
+- [ ] MENU → UPLOAD FILES screen: folder picker (`GET /sd/ls`), file input `<input type="file" accept=".wav" multiple>`, sequential upload via `POST /upload`, per-file progress bar
+- [ ] MENU → SAMPLE CUTTER screen: source file browser, waveform canvas, region handles
+- [ ] Waveform render: fetch source WAV (`GET /sd`), decode with `decodeAudioData()`, draw peak waveform on canvas
+- [ ] Region editing: click+drag to create region, drag handles to adjust start/end, tap to select, [✕] to delete
+- [ ] Region preview: play selected region in-browser from decoded AudioBuffer
+- [ ] [SAVE ALL CUTS]: slice AudioBuffer per region, encode each as 16-bit WAV (inline writer), upload each via `POST /upload?path=<dest-folder>`
+- [ ] Output folder: text input with `GET /sd/ls` autocomplete; [NEW FOLDER] creates it on first upload
+- [ ] Test: load a 10-second WAV, cut 4 regions, save — 4 files appear in sound browser
+- [ ] Test: upload 3 WAV files from iPhone Files app; all appear in correct folder on SD
+
+### M11 — Polish + tuning (1 session)
+- [ ] CPU profiling: audio task < 60% core 1 at 120 BPM, 16 lanes, 1 WS audio client
 - [ ] Tap tempo (touch + web)
 - [ ] Mute/solo per lane
 - [ ] Long-press context menu (rename, duplicate, delete, move lane)
-- [ ] WiFi throughput test: 4 simultaneous audio streams at 1.5 Mbps each
+- [ ] WiFi throughput test: 1 audio stream at 1.5 Mbps + concurrent control WS traffic
 
 ---
 
 ## Open Questions / Decisions Needed
 
 1. **SD slot pin assignment**: confirm ESP32-P4 SDMMC pins don't conflict with MIPI-DSI or GT911
-2. **Polyphony limit**: 4 voices per synth lane x 16 lanes = 64 voices max — need CPU budget test
+2. **Polyphony limit**: **resolved** — 5 voices per synth lane; not all 16 lanes will run synths simultaneously so worst-case is well under 80 voices total. CPU budget test still useful but no hard ceiling concern.
 3. **WAV resampler quality**: kits at 44.1k/22k/48k — linear interpolation is fast but lower quality than sinc; confirm acceptable
-4. **Loop quantization**: should loop restart snap to bar boundary (tight) or be immediate (flexible)?
-5. **JSON parser**: cJSON is ~30 KB flash, no heap-per-token; acceptable vs a minimal custom parser
+4. **Loop quantization**: **resolved** — LIVE mode restarts immediately (flexible, no quantization); SONG mode snaps to the next bar boundary. Toggled by the [LIVE] button; stored as `playback_mode_t` in `song_t`. See section 2.3.
+5. **JSON parser**: **resolved** — use **jsmn** (single-header, ~2 KB flash, zero heap, token array on stack). cJSON allocates a linked list per token and requires heap; jsmn tokenizes in-place into a flat `jsmn_token_t[]` on the caller's stack with no malloc. Song/settings JSON is small and read once at load — stack-allocated tokens are fine. See [jsmn](https://github.com/zserge/jsmn).
 6. **PSRAM confirmed at 32 MB**: no overcommit concerns; all buffers fit with ~13.5 MB headroom
-7. **WiFi AP bandwidth**: 4 audio clients x 1.5 Mbps = 6 Mbps total; ESP32-P4 AP mode max ~20 Mbps -- verify under actual load with control WS traffic concurrent
-8. **Web Audio latency**: 100 ms scheduling buffer may be too much/little depending on WiFi jitter -- tune empirically; range 50-200 ms
-9. **IDF version WebSocket support**: confirm `esp_http_server` WS frames work on the P4's IDF version (5.x required); if not, add `esp-idf-lib/esp_websocket_client` or implement frame parser manually
-10. **Audio stream format**: raw PCM 16-bit stereo 48 kHz is simplest; if WiFi proves lossy consider Opus compression (~32 kbps vs 1.5 Mbps) -- but adds 5-10 ms encode latency and CPU cost
+7. **WiFi AP bandwidth**: **resolved** — only 1 audio client at a time (see item 10); bandwidth concern eliminated. Control WS traffic is negligible (<1 Kbps at 25 Hz playhead + 10 Hz meter). Verify total under load but no concern.
+8. **Web Audio latency**: **resolved** — start with 100 ms scheduling buffer; tune down empirically on mobile. Keep WebSocket frame size small (see item 10) to reduce per-frame jitter. Range 50–150 ms acceptable.
+9. **IDF version WebSocket support**: **resolved** — `esp_http_server` WebSocket support is available in IDF 5.x which the P4 requires; no extra library needed. The C6 `esp_hosted` SPI transport is transparent to the HTTP/WS stack.
+10. **Audio stream format**: **resolved** — raw PCM 16-bit stereo 48 kHz over WebSocket binary frames. Start with PCM; add Opus only if WiFi proves lossy in practice. **Only 1 audio client at a time**: when a new client sends `WS_CMD_AUDIO_STREAM enable=1`, the current audio client's stream is dropped immediately (its ring is freed, its audio flag cleared). The new client takes the slot. This avoids multi-stream bandwidth pressure and simplifies the encode path to a single ring. Frame size: **256 frames = 1024 bytes** (vs 512/2048 previously) — ~5.3 ms per frame, smaller packets reduce per-packet latency jitter on WiFi and fit better in mobile audio scheduling buffers. Bandwidth: 1.5 Mbps (unchanged, single client).
+11. **esp_hosted bring-up**: C6 must be flashed with `esp_hosted` slave firmware before P4 WiFi works. SPI pin assignment (MOSI/MISO/CLK/CS + handshake GPIO) must be confirmed against P4 board schematic — no conflict with MIPI-DSI, GT911 I2C, I2S, or SDMMC pins. Add `esp_hosted` to `idf_component.yml` on the P4 side. Verify AP mode + HTTP server + WebSocket all function over the SPI bridge before building Phase 0.4 upload server.
