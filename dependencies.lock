@@ -44,7 +44,7 @@ dependencies:
       require: private
       version: '>=4.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.5.10
   espressif/esp_hosted:
@@ -97,7 +97,7 @@ dependencies:
       require: private
       version: '>=4.4.2'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.2.1
   espressif/esp_lcd_touch_gt911:
@@ -111,7 +111,7 @@ dependencies:
       require: private
       version: '>=5.2'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.2.0~2
   espressif/esp_lv_decoder:
@@ -250,7 +250,7 @@ dependencies:
       type: service
     version: 1.1.2
   espressif/esp_wifi_remote:
-    component_hash: 5cdfb7b59d312d91c9dd6e8365be6b7b8a16eeef2a2b40d235c4a12f6d0ff769
+    component_hash: 0b57d4ca039bbda1d4eb794f994f8d59547cdbcfd7962227890cd3a0979e6fa8
     dependencies:
     - name: espressif/esp_hosted
       registry_url: https://components.espressif.com
@@ -268,7 +268,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.5.3
+    version: 1.6.0
   espressif/freetype:
     component_hash: a4169cdd22b3572342b2d640d7082405b8895e3214539283601c03412589b65d
     dependencies:
@@ -348,12 +348,12 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.4
+    version: 5.5.2
   lvgl/lvgl:
     component_hash: 184e532558c1c45fefed631f3e235423d22582aafb4630f3e8885c35281a49ae
     dependencies: []
     source:
-      registry_url: https://components.espressif.com/
+      registry_url: https://components.espressif.com
       type: service
     version: 9.5.0
   waveshare/esp32_p4_platform:
@@ -513,10 +513,12 @@ dependencies:
     - esp32p4
     version: 1.0.0
 direct_dependencies:
+- espressif/esp_codec_dev
 - espressif/esp_hosted
+- espressif/esp_lcd_touch
+- espressif/esp_lcd_touch_gt911
 - espressif/esp_wifi_remote
-- lvgl/lvgl
 - waveshare/esp32_p4_platform
-manifest_hash: 6d2bcea89c2c5228a22030bdcca0f0b2b5236dba4f08f0cfc8830b1d1dfce97e
+manifest_hash: aec02183fa6c08614628c683c5bcfe03c4917100737979211e1fdb2dcc182d51
 target: esp32p4
 version: 2.0.0
