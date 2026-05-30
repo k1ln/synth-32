@@ -3,6 +3,9 @@ dependencies:
   espressif/esp_hosted: ">=2.12.8"
   espressif/esp_wifi_remote: ">=1.4.0"
 
+  # mDNS — synth-32.local hostname advertisement
+  espressif/mdns: ">=1.2.0"
+
   # Audio codec
   espressif/esp_codec_dev: ">=1.0.0"
 

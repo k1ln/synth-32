@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>synth-32</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- ── Top bar ─────────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <span class="brand">S—32</span>
+  <div class="play-btn" id="play-btn" onclick="sendTransport()">▶</div>
+  <div>
+    <div class="bpm-display" id="bpm-disp">—</div>
+    <div class="bpm-label">BPM</div>
+  </div>
+  <span class="spacer"></span>
+  <span id="song-name-disp" style="font-family:var(--f-mono);font-size:11px;color:var(--t2);letter-spacing:.08em;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+  <button class="lp-toggle" id="lp-toggle-btn" onclick="laptopToggle()" title="Laptop multi-pane mode">⊞ LAYOUT</button>
+  <div class="ws-dot" id="ws-dot" title="WebSocket"></div>
+</div>
+
+<!-- ── Laptop toolbar (visible only in laptop mode) ──────────────────────── -->
+<div class="lp-toolbar">
+  <span class="lp-cols-label">COLS</span>
+  <select class="lp-cols-sel" id="lp-cols-sel" onchange="laptopSetCols(+this.value)">
+    <option value="1">1</option>
+    <option value="2" selected>2</option>
+    <option value="3">3</option>
+    <option value="4">4</option>
+  </select>
+  <button class="lp-add-btn" onclick="laptopAddPane()">+ ADD PANE</button>
+  <span style="flex:1"></span>
+  <button class="lp-save-btn" onclick="laptopSaveLayout()" title="Save current pane arrangement">SAVE LAYOUT</button>
+  <button class="lp-add-btn" onclick="laptopResetLayout()" title="Reset to default layout">RESET</button>
+</div>
+
+<main>
+
+<!-- ── SONG ──────────────────────────────────────────────────────────────── -->
+<section id="s-song" class="active">
+  <div class="sh">SONG</div>
+  <!-- master strip -->
+  <div class="master-strip">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.12em;color:var(--t2)">MASTER</span>
+    <div class="master-fader"><div class="master-fader-fill" id="master-fill" style="width:80%"></div></div>
+    <div class="meter-bars">
+      <div class="meter-bar"><div class="meter-fill" id="meter-l" style="height:0%"></div></div>
+      <div class="meter-bar"><div class="meter-fill" id="meter-r" style="height:0%"></div></div>
+    </div>
+  </div>
+  <!-- Scenes A–H -->
+  <div style="display:flex;align-items:center;gap:6px;padding:8px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.12em;color:var(--t2);min-width:52px">SCENES</span>
+    <div style="display:flex;gap:4px;flex-wrap:wrap" id="scene-btns">
+      <button class="btn scene-btn" onclick="sceneRecall(0)" oncontextmenu="event.preventDefault();sceneCapture(0)" title="Tap=recall  Long-press=capture">A</button>
+      <button class="btn scene-btn" onclick="sceneRecall(1)" oncontextmenu="event.preventDefault();sceneCapture(1)">B</button>
+      <button class="btn scene-btn" onclick="sceneRecall(2)" oncontextmenu="event.preventDefault();sceneCapture(2)">C</button>
+      <button class="btn scene-btn" onclick="sceneRecall(3)" oncontextmenu="event.preventDefault();sceneCapture(3)">D</button>
+      <button class="btn scene-btn" onclick="sceneRecall(4)" oncontextmenu="event.preventDefault();sceneCapture(4)">E</button>
+      <button class="btn scene-btn" onclick="sceneRecall(5)" oncontextmenu="event.preventDefault();sceneCapture(5)">F</button>
+      <button class="btn scene-btn" onclick="sceneRecall(6)" oncontextmenu="event.preventDefault();sceneCapture(6)">G</button>
+      <button class="btn scene-btn" onclick="sceneRecall(7)" oncontextmenu="event.preventDefault();sceneCapture(7)">H</button>
+    </div>
+    <span style="font-family:var(--f-mono);font-size:10px;color:var(--t3)">right-click=capture</span>
+  </div>
+  <div id="lane-list">
+    <div style="padding:32px 16px;color:var(--t3);font-family:var(--f-mono);font-size:12px;text-align:center">
+      Connecting…
+    </div>
+  </div>
+</section>
+
+<!-- ── DRUM GRID ──────────────────────────────────────────────────────────── -->
+<section id="s-drum">
+  <div class="sh">DRUM GRID — <span id="drum-lane-name">—</span></div>
+  <div class="roll-toolbar" id="drum-toolbar">
+    <button class="btn" onclick="drumScroll(-1)">▲</button>
+    <button class="btn" onclick="drumScroll(1)">▼</button>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">steps:</span>
+    <select id="drum-steps-sel" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 6px;height:32px;font-family:var(--f-mono);font-size:11px" onchange="sendDrumStepCount(+this.value)">
+      <option value="8">8</option><option value="16" selected>16</option><option value="32">32</option><option value="64">64</option>
+    </select>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">bars:</span>
+    <select id="drum-bars-sel" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 6px;height:32px;font-family:var(--f-mono);font-size:11px" onchange="sendDrumBars(+this.value)">
+      <option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option><option value="8">8</option>
+    </select>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2);flex:1" id="drum-rows-vis-label"></span>
+    <button class="btn" onclick="openEuclideanPopup()">EUCL</button>
+    <button class="btn" onclick="if(selected_lane>=0)openFxEditor(selected_lane)">FX</button>
+  </div>
+  <!-- Euclidean popup (hidden by default) -->
+  <div id="eucl-popup" style="display:none;padding:8px 16px;background:var(--bg-2);border-bottom:1px solid var(--line);display:none;flex-wrap:wrap;align-items:center;gap:8px">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">row</span>
+    <input type="number" id="euc-row"   min="0" max="15" value="0" style="width:40px;background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 6px;height:28px;font-family:var(--f-mono);font-size:13px">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">hits</span>
+    <input type="number" id="euc-hits"  min="1" max="32" value="4" style="width:44px;background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 6px;height:28px;font-family:var(--f-mono);font-size:13px">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">steps</span>
+    <input type="number" id="euc-steps" min="1" max="64" value="16" style="width:44px;background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 6px;height:28px;font-family:var(--f-mono);font-size:13px">
+    <button class="btn lime" onclick="openEuclidean()">GEN</button>
+    <button class="btn" onclick="document.getElementById('eucl-popup').style.display='none'">✕</button>
+  </div>
+  <div class="canvas-wrap">
+    <canvas id="drum-canvas"></canvas>
+  </div>
+  <div style="padding:6px 12px;border-top:1px solid var(--line)">
+    <button class="btn" onclick="sendDrumAddRow()" style="width:100%">+ ADD ROW</button>
+  </div>
+</section>
+
+<!-- ── PIANO ROLL ─────────────────────────────────────────────────────────── -->
+<section id="s-roll">
+  <div class="sh">PIANO ROLL — <span id="roll-lane-name">—</span></div>
+  <div class="roll-toolbar">
+    <button class="btn" onclick="rollZoom(2)">−</button>
+    <button class="btn" onclick="rollZoom(0.5)">+</button>
+    <button class="btn" onclick="rollScroll(-1)">◀</button>
+    <button class="btn" onclick="rollScroll(1)">▶</button>
+    <button class="btn" onclick="rollOctShift(-1)">OCT▾</button>
+    <button class="btn" onclick="rollOctShift(1)">OCT▴</button>
+    <select id="roll-snap-sel" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 4px;height:32px;font-family:var(--f-mono);font-size:10px" onchange="rollSetSnap(+this.value)">
+      <option value="4">1/4</option><option value="8">1/8</option><option value="16" selected>1/16</option><option value="32">1/32</option><option value="64">1/64</option><option value="0">free</option>
+    </select>
+    <span style="font-family:var(--f-mono);font-size:10px;color:var(--lime);flex:1;text-align:right" id="roll-pos">—</span>
+    <select id="roll-loop-sel" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 4px;height:32px;font-family:var(--f-mono);font-size:10px" onchange="sendRollLoopLen(+this.value)">
+      <option value="1">1 bar</option><option value="2" selected>2 bars</option><option value="4">4 bars</option><option value="8">8 bars</option><option value="16">16 bars</option>
+    </select>
+    <button class="btn" onclick="if(selected_lane>=0)openFxEditor(selected_lane)">FX</button>
+    <button class="btn" onclick="if(selected_lane>=0)openSynthEditor(selected_lane)">SYNTH</button>
+  </div>
+  <div class="roll-wrap" id="roll-wrap">
+    <canvas id="roll-canvas"></canvas>
+  </div>
+</section>
+
+<!-- ── MASTER ────────────────────────────────────────────────────────────── -->
+<section id="s-master">
+  <div class="sh">MASTER</div>
+  <div class="audio-bar">
+    <span class="audio-label">AUDIO STREAM</span>
+    <button class="btn" id="audio-btn" onclick="toggleAudio()">OFF</button>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)" id="audio-status">disconnected</span>
+  </div>
+  <!-- Playback mode -->
+  <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">MODE</span>
+    <button id="pb-mode-live" class="btn lime" onclick="sendPlaybackMode(0)">LIVE</button>
+    <button id="pb-mode-song" class="btn" onclick="sendPlaybackMode(1)">SONG</button>
+    <span style="font-family:var(--f-mono);font-size:10px;color:var(--t3)">LIVE=immediate · SONG=bar-locked</span>
+  </div>
+  <!-- Master volume + pan -->
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">VOL</span>
+    <input type="range" id="master-vol-range" min="0" max="100" value="80" style="flex:1" oninput="onMasterVolRange(this.value)">
+    <span style="font-family:var(--f-mono);font-size:13px;color:var(--t1);min-width:40px" id="master-vol-val">80%</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">PAN</span>
+    <input type="range" id="master-pan-range" min="-100" max="100" value="0" style="flex:1" oninput="onMasterPanRange(this.value)">
+    <span style="font-family:var(--f-mono);font-size:13px;color:var(--t1);min-width:40px" id="master-pan-val">0</span>
+  </div>
+  <!-- Master FX chain -->
+  <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">FX</span>
+    <button class="btn" onclick="openFxEditor(255)">MASTER FX CHAIN</button>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)" id="master-fx-count">0 effects</span>
+  </div>
+  <!-- Levels readout -->
+  <div class="sh">LEVELS</div>
+  <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2);min-width:16px">L</span>
+    <div style="flex:1;height:10px;background:var(--bg-3);border-radius:3px;overflow:hidden">
+      <div id="lvl-l-bar" style="height:100%;width:0%;background:var(--lime);transition:width .05s"></div>
+    </div>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2);min-width:64px" id="lvl-l-db">— dB</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2);min-width:16px">R</span>
+    <div style="flex:1;height:10px;background:var(--bg-3);border-radius:3px;overflow:hidden">
+      <div id="lvl-r-bar" style="height:100%;width:0%;background:var(--lime);transition:width .05s"></div>
+    </div>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2);min-width:64px" id="lvl-r-db">— dB</span>
+  </div>
+  <!-- Metronome -->
+  <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">METRO</span>
+    <button id="metro-btn" class="btn" onclick="toggleMetronome()">OFF</button>
+    <input type="range" id="metro-vol" min="0" max="100" value="70" style="flex:1" oninput="setMetronomeVol(+this.value)">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t1);min-width:40px" id="metro-vol-val">70%</span>
+  </div>
+  <!-- Send bus return -->
+  <div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">SEND</span>
+    <button class="btn" onclick="openFxEditor(254)">SEND FX</button>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t3)">return:</span>
+    <input type="range" id="send-return-range" min="0" max="100" value="50" style="flex:1" oninput="onSendReturnRange(+this.value)">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t1);min-width:40px" id="send-return-val">50%</span>
+  </div>
+  <!-- Stem export -->
+  <div class="sh">STEM EXPORT</div>
+  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid var(--line)">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id="btn-stem-start" class="btn" style="color:var(--red);border-color:var(--red)" onclick="stemStart()">&#9679; REC STEMS</button>
+      <button id="btn-stem-stop"  class="btn" style="display:none" onclick="stemStop()">&#9632; STOP</button>
+      <span id="stem-elapsed" style="font-family:var(--f-mono);font-size:12px;color:var(--t2)"></span>
+    </div>
+    <div id="stem-status" style="font-family:var(--f-mono);font-size:11px;color:var(--t3)">Records each lane to a separate WAV file on SD card.</div>
+  </div>
+  <!-- BPM tap -->
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">BPM</span>
+    <input type="number" id="bpm-input" min="20" max="300" value="120"
+           style="width:90px;background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 10px;height:44px;font-family:var(--f-mono);font-size:20px"
+           onchange="sendSetClock()">
+    <button class="btn" onclick="sendTap()">TAP</button>
+    <button class="btn" onclick="sendSetClock()">SET</button>
+  </div>
+  <!-- PPQN seg -->
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">PPQN</span>
+    <div style="display:flex;gap:6px" id="ppqn-seg">
+      <button class="btn" data-v="24"  onclick="setPpqn(24)">24</button>
+      <button class="btn" data-v="48"  onclick="setPpqn(48)">48</button>
+      <button class="btn" data-v="96"  onclick="setPpqn(96)">96</button>
+      <button class="btn" data-v="192" onclick="setPpqn(192)">192</button>
+    </div>
+  </div>
+  <!-- Time signature -->
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">TIME</span>
+    <div style="display:flex;gap:6px" id="timesig-seg">
+      <button class="btn" data-ts="4" onclick="setTimeSig(4)">4/4</button>
+      <button class="btn" data-ts="3" onclick="setTimeSig(3)">3/4</button>
+      <button class="btn" data-ts="5" onclick="setTimeSig(5)">5/4</button>
+      <button class="btn" data-ts="6" onclick="setTimeSig(6)">6/8</button>
+      <button class="btn" data-ts="7" onclick="setTimeSig(7)">7/8</button>
+    </div>
+  </div>
+  <!-- ADSR for selected lane -->
+  <div class="sh" id="adsr-title">ADSR — select a lane</div>
+  <div style="padding:8px 16px;border-bottom:1px solid var(--line)">
+    <svg id="adsr-svg" viewBox="0 0 200 60" width="200" height="60" style="display:block">
+      <path id="adsr-curve" d="M0,60 L0,60" fill="none" stroke="var(--lime)" stroke-width="2" stroke-linejoin="round"/>
+    </svg>
+  </div>
+  <div class="adsr-row">
+    <span class="adsr-label">ATK</span>
+    <input type="range" id="adr-a" min="1" max="2000" value="10" oninput="adsr_update('a',this.value)">
+    <span class="adsr-val" id="adv-a">10ms</span>
+  </div>
+  <div class="adsr-row">
+    <span class="adsr-label">DCY</span>
+    <input type="range" id="adr-d" min="1" max="2000" value="100" oninput="adsr_update('d',this.value)">
+    <span class="adsr-val" id="adv-d">100ms</span>
+  </div>
+  <div class="adsr-row">
+    <span class="adsr-label">SUS</span>
+    <input type="range" id="adr-s" min="0" max="100" value="70" oninput="adsr_update('s',this.value)">
+    <span class="adsr-val" id="adv-s">70%</span>
+  </div>
+  <div class="adsr-row">
+    <span class="adsr-label">REL</span>
+    <input type="range" id="adr-r" min="1" max="4000" value="200" oninput="adsr_update('r',this.value)">
+    <span class="adsr-val" id="adv-r">200ms</span>
+  </div>
+</section>
+
+<!-- ── WAV LANE DETAIL ─────────────────────────────────────────────────────── -->
+<section id="s-wav">
+  <div class="sh">WAV — <span id="wav-lane-name">—</span></div>
+  <div style="padding:8px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center">
+    <button class="btn" onclick="nav('song',document.querySelectorAll('.nav-tab')[0])">◀ BACK</button>
+    <button class="btn" onclick="openWavFilePicker()">CHANGE FILE</button>
+    <button class="btn" onclick="if(selected_lane>=0)openFxEditor(selected_lane)">FX</button>
+  </div>
+  <div class="setting-row">
+    <span class="setting-label">File</span>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t1);flex:1;overflow:hidden;text-overflow:ellipsis" id="wav-path-disp">—</span>
+  </div>
+  <div class="setting-row">
+    <span class="setting-label">Loop length</span>
+    <span style="font-family:var(--f-mono);font-size:13px;color:var(--lime)" id="wav-loop-disp">—</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">VOL</span>
+    <input type="range" id="wav-vol" min="0" max="100" value="80" oninput="document.getElementById('wav-vol-val').textContent=this.value+'%';sendLaneVolume(selected_lane,this.value/100)">
+    <span style="font-family:var(--f-mono);font-size:13px;color:var(--t1);min-width:40px" id="wav-vol-val">80%</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:56px">PAN</span>
+    <input type="range" id="wav-pan" min="-100" max="100" value="0" oninput="document.getElementById('wav-pan-val').textContent=this.value;sendLanePan(selected_lane,this.value/100)">
+    <span style="font-family:var(--f-mono);font-size:13px;color:var(--t1);min-width:40px" id="wav-pan-val">0</span>
+  </div>
+</section>
+
+<!-- ── SAMPLE CUTTER ─────────────────────────────────────────────────────── -->
+<section id="s-cutter">
+  <div class="sh">SAMPLE CUTTER</div>
+  <!-- Source file picker -->
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:64px">SOURCE</span>
+    <select id="cut-dir-sel" style="max-width:160px" onchange="loadCutFiles()">
+      <option value="sounds">sounds</option>
+    </select>
+    <select id="cut-file-sel" style="flex:1"></select>
+    <button class="btn" onclick="loadWaveform()">LOAD</button>
+  </div>
+  <!-- Waveform canvas -->
+  <div style="position:relative;background:var(--bg-1);overflow:hidden" id="wfm-wrap">
+    <canvas id="wfm-canvas" style="display:block;width:100%"></canvas>
+    <div id="wfm-msg" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--f-mono);font-size:12px;color:var(--t3)">
+      Load a WAV file to begin
+    </div>
+  </div>
+  <!-- Region list + controls -->
+  <div style="display:flex;gap:8px;padding:8px 16px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);flex-wrap:wrap">
+    <button class="btn" onclick="addRegion()">+ REGION</button>
+    <button class="btn" onclick="previewRegion()">▶ PREVIEW</button>
+    <button class="btn" onclick="delRegion()">✕ DELETE</button>
+    <span style="flex:1"></span>
+    <button class="btn" onclick="saveAllCuts()">SAVE ALL CUTS</button>
+  </div>
+  <!-- Output folder -->
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:64px">SAVE TO</span>
+    <input type="text" id="cut-out-dir" placeholder="cuts" style="flex:1">
+  </div>
+  <div id="region-list" style="padding:8px 16px"></div>
+  <div id="cut-status" style="padding:4px 16px;font-family:var(--f-mono);font-size:11px;color:var(--t2);min-height:20px"></div>
+</section>
+
+<!-- ── FX CHAIN ──────────────────────────────────────────────────────────── -->
+<section id="s-fx">
+  <div class="sh">FX CHAIN — <span id="fx-lane-name">select a lane</span></div>
+  <div style="padding:8px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn" onclick="fxAddSlot()">+ ADD FX</button>
+    <span style="flex:1"></span>
+    <button class="btn" onclick="nav('song',document.querySelectorAll(\'.nav-tab\')[0])">◀ BACK</button>
+  </div>
+  <div id="fx-chain-list"></div>
+  <div id="fx-empty" style="padding:32px 16px;text-align:center;font-family:var(--f-mono);font-size:12px;color:var(--t3)">No effects on this lane</div>
+</section>
+
+<!-- ── FX type picker (bottom sheet) ─────────────────────────────────────── -->
+<div id="fx-picker">
+  <div id="fx-picker-inner">
+    <div class="sh">CHOOSE EFFECT</div>
+    <div id="fx-pick-list"></div>
+  </div>
+</div>
+
+<!-- ── UPLOAD ────────────────────────────────────────────────────────────── -->
+<section id="s-upload">
+  <div class="sh">UPLOAD FILES</div>
+  <div class="upload-row">
+    <label>Save to</label>
+    <select id="dir-sel"><option value="sounds">sounds</option></select>
+    <input type="text" id="dir-new" placeholder="new folder name" style="display:none">
+    <button class="btn" id="btn-new-folder" onclick="toggleNewFolder()">NEW</button>
+  </div>
+  <div id="drop-zone"
+       onclick="document.getElementById('file-input').click()"
+       ondragover="event.preventDefault();this.classList.add('drag-over')"
+       ondragleave="this.classList.remove('drag-over')"
+       ondrop="onDrop(event)">
+    <input type="file" id="file-input" accept=".wav" multiple onchange="onFilePick(this.files)">
+    Tap to choose .wav files — or drag &amp; drop
+  </div>
+  <div class="file-list" id="file-list"></div>
+  <div style="padding:12px 16px;display:flex;gap:10px;align-items:center">
+    <button class="btn lime" id="btn-upload" onclick="startUpload()" disabled>UPLOAD ALL</button>
+    <span id="upload-result" style="font-family:var(--f-mono);font-size:12px;color:var(--t2)"></span>
+  </div>
+</section>
+
+<!-- ── LIVE PLAY ──────────────────────────────────────────────────────────── -->
+<section id="s-live">
+  <div class="sh">LIVE PLAY</div>
+  <div id="live-list"></div>
+</section>
+
+<!-- ── SYNTH PARAMS ───────────────────────────────────────────────────────── -->
+<section id="s-synth">
+  <div class="sh">SYNTH — <span id="synth-lane-name">—</span></div>
+  <div class="sh" style="font-size:12px;color:var(--t2)" id="synth-type-name"></div>
+  <div id="synth-param-list"></div>
+  <div style="padding:8px 16px;border-top:1px solid var(--line)">
+    <button class="btn" onclick="nav('song',document.querySelectorAll('.nav-tab')[0])">◀ BACK</button>
+  </div>
+</section>
+
+<!-- ── SONGS ─────────────────────────────────────────────────────────────── -->
+<section id="s-songs">
+  <div class="sh">SONGS</div>
+  <div style="padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line)">
+    <button class="btn lime" onclick="sendSaveSong()">SAVE</button>
+    <button class="btn" onclick="sendSaveVersioned()" title="Save with auto-incremented suffix _001, _002…">SAVE +VER</button>
+    <button class="btn" onclick="sendNewSong()">NEW</button>
+    <button class="btn" onclick="requestSongList()">REFRESH</button>
+  </div>
+  <!-- Templates -->
+  <div class="sh">TEMPLATES</div>
+  <div style="padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line)">
+    <button class="btn" onclick="sendSaveTemplate()">SAVE AS TEMPLATE</button>
+    <button class="btn" onclick="requestTemplateList()">LOAD TEMPLATE</button>
+  </div>
+  <div id="template-list" style="padding:4px 0"></div>
+  <div id="song-list" style="padding:8px 0"></div>
+  <!-- Export mix -->
+  <div class="sh">EXPORT MIX</div>
+  <div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id="btn-export-start" class="btn" style="color:var(--red);border-color:var(--red)" onclick="exportStart()">&#9679; REC MIX</button>
+      <button id="btn-export-stop"  class="btn" style="display:none" onclick="exportStop()">&#9632; STOP</button>
+      <span id="export-elapsed" style="font-family:var(--f-mono);font-size:12px;color:var(--t2)"></span>
+    </div>
+    <div id="export-status" style="font-family:var(--f-mono);font-size:11px;color:var(--t3)">Records the final stereo mix to SD card as a WAV file.</div>
+    <div id="export-download" style="display:none">
+      <a id="export-dl-link" href="/export/download" class="btn lime" download>&#8595; DOWNLOAD WAV</a>
+    </div>
+  </div>
+</section>
+
+<!-- ── SETTINGS ──────────────────────────────────────────────────────────── -->
+<section id="s-settings">
+  <!-- Connection info -->
+  <div class="sh">CONNECTION</div>
+  <div class="setting-row">
+    <span class="setting-label">mDNS</span>
+    <div style="display:flex;flex-direction:column;gap:2px;text-align:right">
+      <span style="font-family:var(--f-mono);font-size:12px;color:var(--lime)">synth-32.local</span>
+      <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">synth.local · synth32.local</span>
+    </div>
+  </div>
+  <div class="setting-row">
+    <span class="setting-label">IP fallback</span>
+    <span style="font-family:var(--f-mono);font-size:13px;color:var(--t1)">192.168.4.1</span>
+  </div>
+  <!-- WiFi AP settings -->
+  <div class="sh">WIFI NETWORK</div>
+  <div class="setting-row">
+    <span class="setting-label">Network name</span>
+    <div class="setting-ctrl">
+      <input type="text" id="cfg-ssid" maxlength="32" placeholder="synth-32" autocomplete="off">
+    </div>
+  </div>
+  <div class="setting-row">
+    <span class="setting-label">Password</span>
+    <div class="setting-ctrl">
+      <input type="password" id="cfg-pass" maxlength="64" placeholder="min 8 chars" autocomplete="new-password">
+      <button class="btn" onclick="togglePass()">SHOW</button>
+    </div>
+  </div>
+  <div class="setting-row">
+    <span class="setting-label">Confirm</span>
+    <div class="setting-ctrl">
+      <input type="password" id="cfg-pass2" maxlength="64" placeholder="repeat" autocomplete="new-password">
+    </div>
+  </div>
+  <div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn lime" onclick="saveWifi()">SAVE &amp; REBOOT</button>
+  </div>
+  <div id="wifi-status"></div>
+  <!-- SD upload mode -->
+  <div class="sh">SD UPLOAD MODE</div>
+  <div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line)">
+    <button class="btn lime" id="btn-upload-mode-start" onclick="setUploadMode(true)">START UPLOAD MODE</button>
+    <button class="btn" id="btn-upload-mode-stop" onclick="setUploadMode(false)" style="display:none">STOP UPLOAD MODE</button>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2);flex:1" id="upload-mode-status">Use the UPLOAD tab to send .wav files to SD card</span>
+  </div>
+  <!-- Audio defaults -->
+  <div class="sh">DEFAULTS</div>
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:80px">DEF BPM</span>
+    <input type="number" id="def-bpm" min="20" max="300" value="120" style="width:90px;background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 10px;height:44px;font-family:var(--f-mono);font-size:20px">
+    <button class="btn" onclick="sendDefaultBpm()">SET</button>
+  </div>
+  <!-- Autosave interval -->
+  <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)">
+    <span style="font-family:var(--f-mono);font-size:11px;letter-spacing:.14em;color:var(--t2);min-width:80px">AUTOSAVE</span>
+    <select id="autosave-interval" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 8px;height:36px;font-family:var(--f-mono);font-size:12px">
+      <option value="4">every 4 bars</option>
+      <option value="8" selected>every 8 bars</option>
+      <option value="16">every 16 bars</option>
+      <option value="32">every 32 bars</option>
+      <option value="0">off</option>
+    </select>
+    <button class="btn" onclick="sendAutosaveInterval()">SET</button>
+  </div>
+</section>
+
+<!-- ── ARRANGEMENT ────────────────────────────────────────────────────────── -->
+<section id="s-arr">
+  <div class="sh">ARRANGEMENT</div>
+  <div style="padding:8px 16px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <label style="font-family:var(--f-mono);font-size:11px;color:var(--t2);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="arr-enable" onchange="sendArrangement()"> ENABLED
+    </label>
+    <button class="btn lime" onclick="arrAddStep()">+ ADD SCENE</button>
+    <button class="btn" onclick="nav('song',document.querySelectorAll(\'.nav-tab\')[0])">◀ BACK</button>
+  </div>
+  <div id="arr-step-list" style="padding:8px 0"></div>
+</section>
+
+<!-- ── WAVETABLE IMPORT ─────────────────────────────────────────────────────── -->
+<section id="s-wt">
+  <div class="sh">WAVETABLE IMPORT</div>
+  <div style="padding:12px 16px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:10px">
+    <div style="font-family:var(--f-mono);font-size:11px;color:var(--t3)">Upload a single-cycle WAV file as a custom oscillator waveform (slots 1–4).</div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">SLOT</span>
+      <select id="wt-slot-sel" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 8px;height:34px;font-family:var(--f-mono);font-size:12px">
+        <option value="1">1 — CUSTOM1</option>
+        <option value="2">2 — CUSTOM2</option>
+        <option value="3">3 — CUSTOM3</option>
+        <option value="4">4 — CUSTOM4</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <input type="file" id="wt-file-input" accept=".wav" style="font-family:var(--f-mono);font-size:11px;color:var(--t1)">
+      <button class="btn lime" onclick="wtImport()">UPLOAD</button>
+    </div>
+    <div id="wt-import-status" style="font-family:var(--f-mono);font-size:11px;color:var(--t3);min-height:16px"></div>
+  </div>
+</section>
+
+</main>
+
+<!-- ── Context menu (lane long-press) ───────────────────────────────────── -->
+<div id="ctx-menu">
+  <div class="ctx-item" onclick="ctxRename()">RENAME</div>
+  <div class="ctx-item" onclick="ctxDuplicate()">DUPLICATE</div>
+  <div class="ctx-item danger" onclick="ctxDelete()">DELETE</div>
+</div>
+
+<!-- ── Bottom nav ────────────────────────────────────────────────────────── -->
+<nav class="bottomnav">
+  <div class="nav-tab active" onclick="nav('song',this)">
+    <span class="ti">≡</span><span>SONG</span>
+  </div>
+  <div class="nav-tab" onclick="nav('drum',this)">
+    <span class="ti">⊞</span><span>DRUM</span>
+  </div>
+  <div class="nav-tab" onclick="nav('roll',this)">
+    <span class="ti">♩</span><span>ROLL</span>
+  </div>
+  <div class="nav-tab" onclick="nav('master',this)">
+    <span class="ti">⊙</span><span>MASTER</span>
+  </div>
+  <div class="nav-tab" onclick="nav('fx',this)">
+    <span class="ti">⋮</span><span>FX</span>
+  </div>
+  <div class="nav-tab" onclick="nav('live',this);renderLive()">
+    <span class="ti">▶</span><span>LIVE</span>
+  </div>
+  <div class="nav-tab" onclick="nav('cutter',this);loadCutDirs()">
+    <span class="ti">✂</span><span>CUT</span>
+  </div>
+  <div class="nav-tab" onclick="nav('upload',this);loadDirs()">
+    <span class="ti">↑</span><span>UPLOAD</span>
+  </div>
+  <div class="nav-tab" onclick="nav('songs',this);requestSongList()">
+    <span class="ti">♫</span><span>SONGS</span>
+  </div>
+  <div class="nav-tab" onclick="nav('arr',this);renderArrangement()">
+    <span class="ti">⊡</span><span>ARR</span>
+  </div>
+  <div class="nav-tab" onclick="nav('wt',this)">
+    <span class="ti">∿</span><span>WT</span>
+  </div>
+  <div class="nav-tab" onclick="nav('settings',this);loadWifiConfig()">
+    <span class="ti">⚙</span><span>WIFI</span>
+  </div>
+</nav>
+
+<script src="/app.js"></script>
+</body>
+</html>

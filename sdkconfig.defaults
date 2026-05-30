@@ -1,6 +1,9 @@
 # Target
 CONFIG_IDF_TARGET="esp32p4"
 
+# Required for MIPI DSI DPI panel (esp_lcd_new_panel_dpi) on IDF v5.x ESP32-P4
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
 # PSRAM — required for MIPI DSI frame buffers (720x1280 RGB565 x3 = 5.25 MB)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_HEX=y
@@ -10,9 +13,9 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_100=y
 
-# Display — 5-inch 720x1280 (HX8394, MIPI-DSI), single framebuffer to avoid tearing
+# Display — 5-inch 720x1280 (HX8394, MIPI-DSI), double-buffered for flicker-free updates
 CONFIG_BSP_LCD_TYPE_720_1280_5_INCH_A=y
-CONFIG_BSP_LCD_DPI_BUFFER_NUMS=1
+CONFIG_BSP_LCD_DPI_BUFFER_NUMS=2
 
 # ESP-Hosted: WiFi via ESP32-C6 coprocessor over SDIO
 # Disable mempool — pre-allocation of DMA-aligned pool fails on P4 v1.3 silicon
@@ -52,17 +55,27 @@ CONFIG_BT_ENABLED=n
 # HTTP server
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
+CONFIG_HTTPD_WS_SUPPORT=y
 
 # Task watchdog — PSRAM framebuffer writes are slow enough to starve IDLE0.
 # Don't monitor IDLE tasks; the ui task itself won't deadlock.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 
-# Logging
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# Logging — keep WARN only; INFO/DEBUG from audio + stream tasks adds UART latency
+CONFIG_LOG_DEFAULT_LEVEL_INFO=n
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 
 # Flash — 8 MB
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# FATFS — SD cards are formatted with 512-byte sectors. The default 4096-byte
+# FATFS sector size causes mount to succeed but all writes return EACCES
+# (errno 13), making mkdir/fopen-write silently fail.
+CONFIG_FATFS_SECTOR_512=y
+# CONFIG_FATFS_SECTOR_4096 is not set
+CONFIG_WL_SECTOR_SIZE_512=y
+# CONFIG_WL_SECTOR_SIZE_4096 is not set
 
 # Custom partition table
 CONFIG_PARTITION_TABLE_CUSTOM=y

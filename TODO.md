@@ -747,6 +747,16 @@ typedef struct {
 
 ### 4.2 Per-lane ADSR volume envelope
 
+> **v2 Design (FX+ADSR screen):** Mini top bar: back | "FX · {lane name}" | ADD button.
+> **ADSR panel** (top area, `--bg-2` background, 2 px `--line-2` border, 10 px radius):
+>   - "LANE ADSR" label in 16 px lime mono + 4 knobs (A/D/S/R, 80 px diameter) side by side.
+>   - Mini ADSR preview SVG curve (200×60 px) to the left of the knobs showing current shape with lime fill.
+> **FX chain** (middle): 6 slots in a row with arrow chevrons between them. Slot: flex-1 wide × 80 px tall.
+>   Filled: `--bg-3` border, slot number 13 px `--t3`, name 22 px bold. Empty: dashed border.
+>   Selected: lime border + `--lime-dim` background, name in lime.
+> **Selected FX params panel** (bottom, `--bg-2` border box): section header with FX name + "● ON" indicator.
+>   Knob row centered: one 80 px knob per parameter, with label (14 px mono `--t2`) and value (20 px mono).
+
 Every lane (WAV, DRUM, SYNTH) has a dedicated ADSR volume envelope independent of any
 synth-level ADSR. This shapes the overall amplitude of the lane output over time and can
 be used to fade in pads, punch kicks, or gate loops.
@@ -871,6 +881,13 @@ At 96 PPQN: 1 bar = 384 ticks. Loop lengths are always expressed in whole bars:
 
 ### 5.1 UI screen tree
 
+> **v2 Design:** Navigation uses a **bottom tab bar** (88 px tall) with 4 tabs: SONG · LIVE · MASTER · MENU.
+> Sub-screens (drum grid, piano roll, FX, sound browser, settings) replace the bottom tabs with a
+> **mini top bar**: 88 px back-chevron button | screen title | right-side controls (selectors/buttons).
+> No top BPM bar on sub-screens. Font stack: IBM Plex Sans (labels) + IBM Plex Mono (numbers/paths).
+> Color tokens: `--bg-0 #08080A` … `--bg-5 #32323B`; accent `--lime #C7F546`; DRUM=lime, SYNTH=cyan `#5BC4FF`, WAV=amber `#FFB547`.
+> Touch targets ≥ 115 px (10 mm at 293 ppi). Body text ≥ 28 px. Labels ≥ 22 px. Max 4–5 list items visible at once.
+
 **Top bar is context-specific** — it shows only what is relevant to the current screen.
 SONG VIEW has the full transport bar. Detail screens replace it with a minimal bar: just [BACK] + screen title + one or two relevant controls. No BPM, no song name, no MENU clutter.
 
@@ -937,6 +954,13 @@ Navigation rules:
 
 ### 5.2 Screen: SONG VIEW (main)
 
+> **v2 Design:** Full-height lane list; each row 100 px tall with a 6 px left color bar (lime/cyan/amber per type).
+> Row layout (L→R): color bar | main content (lane number 20 px mono, name 28 px bold, type chip, source name) | mute button 56×56 px | FX icon 64 px wide | chevron 64 px wide.
+> Bottom of each row: loop length label + horizontal fader (12 px tall) + dB readout + playback progress dot-bar.
+> Muted rows: `opacity: 0.4`. Mute button: unfilled box (unmuted) or filled red square (muted).
+> Master strip (60 px): fader + dB value + L/R meter bars. Followed by 4-tab bottom bar.
+> Top bar (72 px): `S—32` brand (lime, mono) | BPM label + 38 px value | PLAY/STOP buttons | song name (right-aligned, mono, with SD icon).
+
 ```
 +--BPM--PLAY--STOP--SongName.s32-----------------------LIVE--MASTER--MENU--+
 | #  | NAME          | TYPE/SOURCE  | LOOP   | VOL  | PAN | FX | MU | PLAY |
@@ -969,6 +993,13 @@ Navigation rules:
 - Long-press row: context menu (Rename / Duplicate / Delete / Move up / Move down)
 
 ### 5.3 Screen: DRUM GRID EDITOR
+
+> **v2 Design:** Mini top bar: back (88 px) | "Drums" title | STEPS selector | BARS selector (right-aligned controls in bordered cells).
+> Beat header (48 px): 164 px label column + 4 beat groups each spanning 4 steps; beat number 22 px bold + 4 small dot indicators (8 px, lime when playhead).
+> Row label column (164 px): row name 24 px bold mono + small fader (64 px wide, 8 px tall) below.
+> Step cells: 68×68 px, border-radius 6 px. Off=`--bg-3` with `--line-2` border. On=lime background. Accented=amber background. Playhead col=white inset border ring.
+> Step groups divided by thin `--line` vertical separators. 4 rows visible at once (120 px each). Rows scroll vertically.
+> Bottom toolbar (72 px): COPY / PASTE / CLEAR buttons + "ROWS X—Y OF N" counter + down-chevron for row scroll.
 
 Full-screen. All rows of the drum lane visible at once.
 
@@ -1008,6 +1039,16 @@ Interactions:
 Colors: off=dark grey, on=green, accented=yellow, playhead col=dim white overlay, muted=blue-grey
 
 ### 5.4 Screen: PIANO ROLL EDITOR
+
+> **v2 Design:** Mini top bar: back | lane name | SYNTH selector | SNAP selector.
+> Bar header (46 px): wave icon in key column + beat/bar label row (bar=`--line-3` separator, beat=lighter).
+> Piano key column: 100 px wide. Each key row 42 px tall. Black keys `--bg-1` background with `--t2` text; white keys `--bg-2` with `--t0` text; note labels (e.g. "E4") shown.
+> Note grid: 1 octave visible (12 rows × 42 px = 504 px). Black key rows subtle `rgba(255,255,255,0.015)` tint.
+> Vertical grid: bar lines=2 px `--line-3`; beat lines=1 px `--line-2` 70% opacity; 16th lines=1 px `--line` 40% opacity.
+> Note blocks: `rgba(199,245,70, 0.5–1.0)` fill (brightness = velocity/127), 3 px lime left border, border-radius 4 px, note label in 14 px bold mono inside block.
+> Playhead: 2 px lime vertical line with `box-shadow: 0 0 12px var(--lime)`.
+> Bottom toolbar (76 px): OCT◄ / range label / OCT► | zoom buttons | FX button | playhead position `▸ bar · beat · tick` (lime, right).
+> Scroll: swipe up/down = octave scroll; swipe left/right = time scroll; pinch = zoom time axis.
 
 Full-screen. Scrollable horizontally (time) and vertically (pitch).
 
@@ -1054,6 +1095,12 @@ Note display:
 
 ### 5.5 Screen: LIVE PLAY MODE
 
+> **v2 Design:** Compact top bar (64 px) with brand + BPM + play/stop + song name.
+> Lane selector strip (52 px): horizontal scrolling tab row, one tab per lane (`"01 DRUMS"` etc.), active tab lime highlight.
+> **Drum variant:** 2×4 pad grid fills remaining space. Pads: `--bg-3` fill, 3 px border, 12 px border-radius. Hit state: lime fill + `box-shadow: 0 0 36px var(--lime-glow)`. Pad label 24 px bold mono, centered.
+> **Piano variant:** Synth info bar (60 px) with type chip + synth name + EDIT + FX buttons. Full-height piano keyboard below: white keys `#E8E8EC` with lime on-state, black keys `#0A0A0C` overlay (58% height), octave labels at C positions. Bottom bar (72 px): OCT◄ | range | OCT► | voice count indicator.
+> Both variants use the 4-tab bottom nav bar.
+
 Tap [LIVE] from SONG VIEW. Song continues playing. Shows all active lanes as a scrollable list.
 Each lane type gets a different interactive widget.
 
@@ -1099,6 +1146,12 @@ WAV lane widget:
 
 ### 5.6 Screen: MASTER SECTION
 
+> **v2 Design:** 3-column layout (full height, bottom tab bar at bottom).
+> **Left panel (340 px):** "VOLUME" section header; vertical fader (40×260 px, gradient lime→amber→red) with thumb handle; dB readout 28 px; L/R meter columns (20×260 px each); PAN knob (80 px diameter) with indicator line.
+> **Middle panel (flex):** "FX CHAIN" header with slot count. 6 FX slots horizontal, each ~flex-1 wide × 80 px tall, rounded 8 px. Filled=`--bg-3` with slot number 13 px + name 20 px. Empty=dashed border. Selected slot=lime border + `--lime-dim` background. Below: selected FX knob row (80 px knobs with label + value).
+> **Right panel (320 px):** "CLOCK" header. BPM: 42 px lime mono. TAP TEMPO full-width button. PPQN segmented control (24/48/96/192). TIME SIG segmented control (4/4, 3/4, 6/8). Position readout `BAR · BEAT · TICK` in lime below divider.
+> Knob design: 80 px, radial gradient, `--line-3` border, lime indicator line with glow.
+
 Tap [MASTER] from SONG VIEW header.
 
 ```
@@ -1122,6 +1175,13 @@ Tap [MASTER] from SONG VIEW header.
 ```
 
 ### 5.7 Screen: SETTINGS
+
+> **v2 Design:** Mini top bar with "Settings" title + "SAVED" indicator (lime SD icon).
+> Large scrollable row list. Each row 72 px tall with label (22–24 px mono) left + control right.
+> Controls: toggle switches (68×38 px pill, lime when on), segmented controls for multi-value, text fields for editable values.
+> Section headers in 16 px uppercase mono `--t2`. Settings grouped: AUDIO · DISPLAY · WIFI / UPLOAD · DEFAULTS.
+> WiFi section shows AP SSID, all three mDNS hostnames, IP fallback, START/STOP UPLOAD MODE buttons (full-width, 72 px).
+> No bottom tab bar on settings (mini-bar sub-screen).
 
 Reached from MAIN MENU -> SETTINGS. All changes write immediately to /sdcard/settings.json.
 
@@ -1172,6 +1232,11 @@ Reached from MAIN MENU -> LOAD SONG.
 - [DELETE]: asks confirmation before removing from SD
 
 ### 5.9 Screen: SOUND BROWSER
+
+> **v2 Design:** Mini top bar with "Sounds" title + SD stats (35 kits · 437 MB).
+> Two-column layout (no bottom tabs — sub-screen).
+> **Left column (380 px):** "KITS" section header. Kit rows 72 px each: kit name 22 px mono (lime when selected) + file count right. Selected row: `--lime-dim` background + 4 px lime left border + chevron.
+> **Right column (flex):** Section header with kit name + total files + size. File rows 72 px each: 44 px circular play button (lime border, lime fill when selected) | filename 22 px mono (truncated) | duration right. Selected row: lime accent. Bottom action bar (72 px, `--bg-2`): full-width lime ASSIGN primary button.
 
 Reached from drum row [+] or WAV lane file picker.
 
@@ -2097,184 +2162,197 @@ function sliceToWav(audioBuffer, startSample, endSample, sampleRate) {
 ## Implementation Order (Milestones)
 
 ### M0 — SD + Upload + mDNS (1–2 sessions)
-- [ ] Add SD card driver and FAT mount
-- [ ] Implement manifest + delta upload over WiFi
-- [ ] `POST /upload?path=<dir>` — multipart WAV upload, stream to SD, no RAM buffering
-- [ ] `GET /sd/ls?path=<dir>` — directory listing as JSON (for folder picker + sample cutter browser)
-- [ ] `GET /sd?path=<p>` — single file download from SD (for sample cutter source fetch)
-- [ ] mDNS init: register `synth-32.local`, `synth.local`, `synth32.local`
-- [ ] Captive portal: minimal DNS responder on UDP:53 returning device IP for all queries;
-      HTTP catch-all handler redirecting unknown hosts to `http://synth-32.local/`
-- [ ] Test: join AP on iPhone/Android -> captive popup -> taps -> opens (future) web UI
-- [ ] Test: `http://synth-32.local`, `http://synth.local`, `http://synth32.local` all resolve
-- [ ] Test: upload a single kit via `upload_sounds.py` using IP fallback
+- [x] Add SD card driver and FAT mount (`sdcard.c`, FAT mount at `/sdcard`)
+- [x] Implement manifest + delta upload over WiFi (`sounds_http.c`: manifest/upload/commit handlers)
+- [x] `POST /upload?path=<dir>` — multipart WAV upload, stream to SD, no RAM buffering
+- [x] `GET /sd/ls?path=<dir>` — directory listing as JSON (for folder picker + sample cutter browser)
+- [x] `GET /sd?path=<p>` — single file download from SD (for sample cutter source fetch)
+- [x] mDNS init: register `synth-32.local` (`mdns_init.c`)
+- [x] Captive portal: minimal UDP DNS responder on port 53 + HTTP catch-all redirect (`mdns_init.c`)
+- [ ] Test: join AP on iPhone/Android -> captive popup -> taps -> opens web UI
+- [ ] Test: `http://synth-32.local` resolves; upload a kit via IP fallback
 - [ ] Test: upload a WAV file from mobile browser via `POST /upload`
 
 ### M1 — WAV streaming (1–2 sessions)
-- [ ] WAV header parser (`wav_open`)
-- [ ] Stream ring buffer in PSRAM
-- [ ] SD stream task
-- [ ] Single-lane WAV playback (looping)
+- [x] WAV header parser (`wav_open` in `wav_player.c`)
+- [x] Stream ring buffer in PSRAM (`stream_ring_t`, `wav_player.c`)
+- [x] SD stream task (`wav_player.c` sd_stream_task, core 0)
+- [x] Single-lane WAV playback (looping) — drained in audio task
 - [ ] Test: loop a drum sample continuously
 
 ### M2 — Clock + 16 lanes (1 session)
-- [ ] Master clock (BPM, PPQN, tick counter)
-- [ ] Lane model + per-lane loop length (WAV / DRUM / SYNTH types)
-- [ ] All 16 lanes mix into master bus
-- [ ] Volume + pan per lane
+- [x] Master clock (BPM, PPQN, tick counter) — `clock.c`
+- [x] Lane model + per-lane loop length — `lane.h/c`, LIVE/SONG playback modes
+- [x] All 16 lanes mix into master bus — audio task per-lane loop
+- [x] Volume + pan per lane — `lane_apply_volume_pan()`
 - [ ] Test: 4 WAV lanes at different loop lengths
 
 ### M2b — Drum sequencer (2 sessions)
-- [ ] `drum_seq_t` data model + step trigger in audio task
-- [ ] Per-row stream ring retrigger on step hit
-- [ ] Velocity scaling per step
-- [ ] Accent multiplier
-- [ ] Resolution change (8/16/32/64) with step remap
-- [ ] Sample playback modes: ONE_SHOT, LOOP, LOOP_PING, GATE, SLICE
-- [ ] Loop points: `loop_start` / `loop_end` byte offsets; 2–8 ms cross-fade to prevent clicks
-- [ ] Ping-pong: SD stream task reads forward then backward between loop points
-- [ ] Reverse playback: fill ring in reverse order from SD
-- [ ] Pitch shift per row: adjust resampler ratio from semitone value
-- [ ] Start offset per row: seek to `start_offset` fraction of PCM data on trigger
-- [ ] Multi-hit: `multi_hit_count` chains, per-hit WAV path + gap_ms; schedule via `multi_next_tick`
-- [ ] Pre-allocate all `multi_ring[]` in PSRAM at lane load; no alloc at trigger time
+- [x] `drum_seq_t` data model + step trigger in audio task (`drum_seq.c`)
+- [x] Per-row stream ring retrigger on step hit
+- [x] Velocity scaling per step; accent multiplier
+- [x] Resolution change (8/16/32/64) with step remap
+- [x] Sample playback modes: ONE_SHOT, LOOP, LOOP_PING, GATE, SLICE
+- [x] Loop points with cross-fade; ping-pong; reverse playback; pitch shift; start offset
+- [x] Multi-hit chains (`multi_hit_count`, `multi_next_tick`); PSRAM rings pre-allocated
 - [ ] Test: 4-row drum pattern at 120 BPM, 16 steps, loops correctly
-- [ ] Test: flam (2-hit, 8 ms gap); snare roll (6-hit, 30 ms gaps); reverse kick; pitch-shifted hi-hat
-- [ ] Test: LOOP mode hi-hat buzzes continuously; LOOP_PING has no click at boundary
+- [ ] Test: flam; snare roll; reverse kick; pitch-shifted hi-hat; LOOP_PING boundary
 
 ### M3 — Synth instruments + piano roll + arpeggiator (2–3 sessions)
-- [ ] Synth vtable interface
-- [ ] Implement types 0–5 (wavetable, supersaw, FM, subtractive)
-- [ ] Implement types 6–11 (KS, bell, pad, noise, bass, lead)
-- [ ] Implement types 12–19 (chord, drums, organ, wavetable morph, vowel, bitcrush)
-- [ ] LFO system (sine/tri/square/saw/S&H, Hz or clock-sync, modulation matrix)
-- [ ] `piano_roll_t` data model + note event playback in audio task (sorted scan)
-- [ ] Snap grid quantization
-- [ ] **Arpeggiator** (`arp_t`): modes UP/DOWN/UP_DOWN/UP_DOWN_INCL/ORDER/RANDOM/CHORD/AS_PLAYED
-- [ ] Arp octave range 1–4, step division (4/8/16/32), gate %, latch toggle
-- [ ] Arp swing: delay even steps by swing_pct offset
-- [ ] Arp velocity modes: ORIGINAL / ACCENT (alternate) / FIXED
-- [ ] Arp retrigger: re-gate ADSR envelope on each arp step
-- [ ] Arp + piano roll integration: piano roll notes act as held set when arp enabled
-- [ ] Test: piano roll drives synth through a 2-bar melody, loops correctly
-- [ ] Test: arp UP mode, 2 octaves, 1/16 steps, latch on — stable repeating pattern
-- [ ] Test: arp RANDOM mode; CHORD mode fires all notes at once; swing at 62 % audible
+- [x] Synth vtable interface (`synth.h`, `synth_inst_t`)
+- [x] Types 0–5: mono WT, poly WT, supersaw, FM2, FM4, subtractive (`synth_osc.c`)
+- [x] Types 6–11: KS, bell, pad, noise, bass, lead (`synth_phys.c`)
+- [x] Types 12–19: chord, BD/SD/HH drums, organ, morph, vowel, bitcrush (`synth_extra.c`)
+- [x] LFO system — `lfo.c`, 4 LFOs per lane, clock-sync, mod matrix
+- [x] `piano_roll_t` data model + note event playback (`piano_roll.c`)
+- [x] Snap grid quantization; arpeggiator (`arp.c`) — all modes, swing, latch, octave range
+- [ ] Test: piano roll 2-bar melody loops; arp UP/RANDOM/CHORD modes; swing audible
 
 ### M4 — Effects + ADSR (2–3 sessions)
-- [ ] Per-lane ADSR engine (`adsr.c`): attack/decay/sustain/release, computed per block
-- [ ] ADSR gate: opens on lane play, closes on stop; re-triggers on loop restart
-- [ ] ADSR serialised in song JSON (attack_ms, decay_ms, sustain, release_ms per lane)
-- [ ] `fx.c` / `fx.h`: `fx_node_t` vtable, `fx_chain_process()`, `fx_chain_set_param()`
-- [ ] **Filters**: LP / HP / BP / Notch biquad (Chamberlin SVF, int32)
-- [ ] **EQ 3-band**: low shelf + mid peak + high shelf
-- [ ] **EQ 5-band**: 5 fully parametric biquad bands
-- [ ] **Compressor**: RMS + gain computer, block-rate
-- [ ] **Limiter**: brick-wall lookahead (2 ms), master chain essential
-- [ ] **Gate**: RMS threshold with hysteresis, hold time
-- [ ] **Transient Shaper**: fast/slow envelope follower difference for attack/sustain control
-- [ ] **Distortion**: drive + tone, modes: soft-clip / hard-clip / tube (tanh) / fuzz
-- [ ] **Overdrive**: asymmetric soft-clip (warm, even harmonics)
-- [ ] **Wavefolder**: Buchla-style fold-back waveshaper
-- [ ] **Bit-Crush**: bit-depth quantiser + sample-rate divider
-- [ ] **Delay**: stereo circular buffer in PSRAM, ping-pong, clock-sync (1/16–4 bars)
-- [ ] **Reverb**: Freeverb (8 comb + 4 allpass), room/damping/width
-- [ ] **Chorus**: 3-tap LFO delay
-- [ ] **Flanger**: short LFO delay + feedback
-- [ ] **Phaser**: 4-stage all-pass LFO sweep
-- [ ] **Tremolo**: LFO amplitude modulation
-- [ ] **Vibrato**: LFO pitch modulation via delay line
-- [ ] **Ring Modulator**: × sine carrier, sum/difference sidebands
-- [ ] **Pitch Shift**: granular ±24 semitones
-- [ ] **Auto-Pan**: LFO L↔R sweep
-- [ ] **Stereo Width**: mid/side width control
-- [ ] Master FX chain (same node type, operates post-mix)
+- [x] Per-lane ADSR engine — `lane_adsr_t` in `fx.h`, `lane_adsr_process()` in `fx.c`
+- [x] ADSR gate, loop restart retrigger; serialised in song JSON
+- [x] `fx.c` / `fx.h`: full vtable, `fx_chain_process()`, `fx_new()` factory
+- [x] All 25+ effect types implemented: filters, EQ3/5, compressor, limiter, gate, transient shaper, distortion (4 modes), overdrive, wavefolder, bitcrush, delay (ping-pong, clock-sync), reverb (Freeverb), chorus, flanger, phaser, tremolo, vibrato, ring mod, pitch shift, auto-pan, stereo width — plus extras: tape sat, tube amp, exciter, harmonic enhancer, formant filter, comb, tilt EQ, pitch quantiser, granular freeze, stutter, tape stop, Haas, resonator, freeze reverb, step filter, sidechain comp, trance gate, arp delay
+- [x] Master FX chain (same `fx_node_t` type, operates post-mix)
 - [ ] Test: lane with ADSR fade-in → Overdrive → Delay → Reverb → master EQ5 → Compressor → Limiter
 - [ ] Test: Distortion all 4 modes audible; Wavefolder adds metallic overtones; Bit-Crush degrades correctly
 
 ### M5 — Song save / load / settings (1 session)
-- [ ] cJSON dependency added to idf_component.yml
-- [ ] `settings_load()` / `settings_save()` — read/write /sdcard/settings.json
-- [ ] Boot loads settings before audio init
-- [ ] `song_new()` — blank song with defaults
-- [ ] `song_save(path)` — atomic write via .tmp + rename
-- [ ] `song_load(path)` — parse JSON, populate lanes
-- [ ] Dirty flag + `*` indicator in SONG VIEW song name (e.g. `MySong.s32 *`)
+- [x] jsmn vendored as main/jsmn.h (single-header, zero-heap; replaces cJSON)
+- [x] `settings_load()` / `settings_save()` — read/write /sdcard/settings.json (`settings.h/c`)
+- [x] Boot loads settings before audio init (synth-32.c: after sdcard_init)
+- [x] `song_new()` — blank song with settings defaults (song.h/c)
+- [x] `song_save(path)` — atomic write via .tmp + rename, PSRAM scratch buffer
+- [x] `song_load(path)` — jsmn parse, populates all lane fields (type/vol/pan/loop/wav_path/synth/piano_roll/drum_seq/arp/lfo/adsr/fx chain)
+- [x] Dirty flag on `song_t.dirty` — UI should suffix `*` when `g_song.dirty == true`
+- [x] Auto-reload `g_settings.last_song` at boot if non-empty
 - [ ] Test: save a song, reboot, reload it — all lanes identical
 
 ### M6 — Touch UI navigation + screens (3–4 sessions)
-- [ ] Refactor existing draw primitives into gfx.c
-- [ ] `ui_nav` screen stack: push/pop; SONG VIEW renders full transport bar; all other screens render minimal bar (`[BACK] + title + 1–2 controls`)
-- [ ] SONG VIEW: 16 lane rows, scrollable, type badges, add lane button
-- [ ] MAIN MENU overlay: new/save/load/settings/about
-- [ ] SONG BROWSER screen: list .s32 files, load/delete/rename
-- [ ] SETTINGS screen: all settings, write on change
-- [ ] MASTER SECTION screen: volume, FX chain, levels, clock
-- [ ] DRUM GRID EDITOR: step cells, row labels, resolution selector, playhead
-- [ ] Drum grid: velocity long-press, accent, row sound assignment, ADSR panel
-- [ ] PIANO ROLL EDITOR: note blocks, piano key column, scroll + zoom
-- [ ] Piano roll: tap to place, drag to move/resize, velocity bar, auto-scroll playhead
-- [ ] LIVE PLAY MODE: drum pads + synth piano widgets, scrollable list
-- [ ] FX chain editor (per-lane + master) with ADSR knobs in lane detail
-- [ ] Sound browser + upload progress
-- [ ] Knob/slider delta-drag controls
+
+> **v2 Design system** (all screens — see Section 5 for per-screen details):
+> - Color palette: `--bg-0 #08080A` / `--bg-1 #0E0E11` / `--bg-2 #15151A` / `--bg-3 #1C1C22` / `--bg-4 #25252C` / `--bg-5 #32323B`; borders `--line #1E1E26` / `--line-2 #2A2A34` / `--line-3 #3A3A45`
+> - Text: `--t0 #F4F4F6` / `--t1 #B8B8C0` / `--t2 #74747D` / `--t3 #4B4B54`
+> - Accents: lime `#C7F546` (DRUM, active, playhead), cyan `#5BC4FF` (SYNTH), amber `#FFB547` (WAV), red `#FF4F4F` (mute active)
+> - Fonts: IBM Plex Sans (labels/body), IBM Plex Mono (all numbers, paths, mono labels)
+> - Touch: all interactive elements ≥ 115 px (10 mm). Body text ≥ 28 px. Labels ≥ 22 px.
+> - Navigation: **4-tab bottom bar** (88 px) on main screens: SONG · LIVE · MASTER · MENU. Sub-screens use **mini top bar** (72 px): 88 px back zone + title + right controls (bordered separator cells). No tab bar on sub-screens.
+> - Buttons: 72 px tall standard, 56 px `sm` variant. Primary buttons: lime fill + dark text + bold.
+> - Segmented controls: 60 px tall, active segment = lime fill.
+> - Knobs: 80 px diameter, radial gradient dark, lime indicator dot with glow.
+> - Faders: 12 px tall, `--bg-4` track, colored fill.
+> - Type chips: 36 px tall pill — DRUM=lime-dim bg/lime text, SYNTH=cyan-dim/cyan, WAV=amber-dim/amber.
+> - Scanline overlay: subtle `repeating-linear-gradient` at 4 px pitch, 0.8% opacity.
+
+- [x] Refactor existing draw primitives into gfx.c (draw_rect, hline, vline, fill_round_rect, draw_round_rect, fill_circle)
+- [x] `ui_nav` screen stack: push/pop; SONG VIEW renders full transport bar; all other screens render minimal bar (`[BACK] + title + 1–2 controls`)
+- [x] SONG VIEW: 4-tab bottom nav; 100 px lane rows with 6 px left color bar; mute/FX/chevron right side; master strip 60 px; top bar 72 px with BPM+transport+song name
+- [x] MAIN MENU: dedicated MENU tab — NEW SONG / LOAD / SAVE / SAVE AS / SOUNDS / SETTINGS / UPLOAD / SAMPLE CUT (8 card grid)
+- [x] SONG BROWSER screen: list .s32 files, LOAD/DELETE buttons
+- [x] SETTINGS screen: 80 px rows, faders, segmented controls, toggles
+- [x] MASTER SECTION screen: 3-column layout — vertical fader+meters / FX chain slots / clock controls (BPM, tap tempo, PPQN, time sig)
+- [x] DRUM GRID EDITOR: mini top bar with STEPS/BARS; 164 px label col; step cells (lime=on, amber=accent); beat header with playhead dots; bottom toolbar
+- [x] Drum grid: velocity long-press overlay; row scrolling (currently capped at 4 rows)
+- [x] PIANO ROLL EDITOR: mini top bar; 100 px key column; 42 px row height; lime notes with velocity brightness; vertical 16th grid lines; bottom octave toolbar
+- [x] Piano roll: horizontal scroll / zoom; drag to move/resize notes; velocity bar at note bottom
+- [x] LIVE PLAY MODE: lane selector strip 52 px; drum 2×4 pad grid; piano full-height keyboard with octave shift
+- [x] FX+ADSR screen: ADSR panel with 4 knob cells; FX chain slots with arrows; selected FX detail panel with ON/OFF toggle
+- [x] Sound browser: 380 px kit column + file column; 72 px rows; circular play buttons; lime ASSIGN button
+- [x] Knob/slider delta-drag controls; double-tap to reset
 - [ ] Test: full navigation tree walk on device via touch; save and reload a song
 
 ### M7 — WebSocket server + command bus (1–2 sessions)
-- [ ] `ws_server.c`: IDF WebSocket endpoint at `ws://synth-32.local/ws` (also `ws://192.168.4.1/ws`), max 4 clients
-- [ ] `ws_cmd.c`: shared command queue; touch and WS both post here; audio task processes
-- [ ] Full state dump (`WS_MSG_FULL_STATE`) on client connect
-- [ ] Broadcast diffs on all state changes (from touch or WS)
-- [ ] All WS_CMD_* handlers: lane, drum step, note, FX, ADSR, clock, transport, song ops
-- [ ] Meter broadcast (WS_MSG_METER) at 10 Hz
-- [ ] Playhead broadcast (WS_MSG_PLAYHEAD) at 25 Hz
+- [x] `ws_server.c`: IDF WebSocket endpoint at `ws://synth-32.local/ws` (also `ws://192.168.4.1/ws`), max 4 clients
+- [x] `ws_cmd.c`: ws_cmd_dispatch() decodes all WS_CMD_* frames, writes g_song, calls ws_notify_change()
+- [x] Full state dump (`WS_MSG_FULL_STATE`) on client connect
+- [x] Broadcast diffs on all state changes (from touch or WS)
+- [x] All WS_CMD_* handlers: lane, drum step, note, FX, ADSR, clock, transport, song ops
+- [x] Meter broadcast (WS_MSG_METER) at 10 Hz
+- [x] Playhead broadcast (WS_MSG_PLAYHEAD) at 25 Hz
 - [ ] Test: open two browser tabs + touch screen simultaneously; all stay in sync
 
 ### M8 — Audio streaming over WebSocket (1 session)
-- [ ] `ws_audio.c`: single encode ring in PSRAM (8 KB); `s_audio_client_fd` (-1 = no client)
-- [ ] `WS_CMD_AUDIO_STREAM enable=1`: drop existing audio client if any (send `WS_MSG_AUDIO_DROPPED`, free ring), then claim slot for new client
-- [ ] `WS_CMD_AUDIO_STREAM enable=0` / disconnect: free ring, set `s_audio_client_fd = -1`, re-enable PA
-- [ ] After I2S write: if client active, copy block into encode ring
-- [ ] `ws_audio_task` (core 0, priority 8): drain ring, send binary WS frames (256 frames = 1024 bytes raw PCM)
-- [ ] PA GPIO muted while `s_audio_client_fd >= 0`; re-enabled on release
+- [x] `ws_audio.c`: single encode ring in PSRAM (8 KB); `s_client_fd` (-1 = no client)
+- [x] `WS_CMD_AUDIO_STREAM enable=1`: drop existing audio client (send `WS_MSG_AUDIO_DROPPED`, unmute PA), claim new slot, mute PA, reset ring
+- [x] `WS_CMD_AUDIO_STREAM enable=0` / disconnect: `ws_audio_stop()` / `ws_audio_client_closed()`, re-enable PA
+- [x] After I2S write: `ws_audio_push()` copies block into PSRAM ring
+- [x] `ws_audio_task` (core 0, priority 8): drain ring in 256-frame blocks, `ws_send_to_fd()` binary frames
+- [x] PA GPIO muted while client holds stream; re-enabled on release
 - [ ] Test: phone connects, enables audio, device speaker mutes, phone plays audio in sync
 - [ ] Test: second phone connects with audio=1, first phone gets `WS_MSG_AUDIO_DROPPED`, second takes over
 
 ### M9 — Web UI (2–3 sessions)
-- [ ] `tools/web/index.html`: single-file vanilla JS/CSS web app
-- [ ] `tools/web/build_web.py`: minify + gzip + emit `web_assets.c`
-- [ ] HTTP GET `/` serves gzip HTML with `Content-Encoding: gzip`
-- [ ] WebSocket connects to `ws://synth-32.local/ws` (page auto-detects hostname: `new WebSocket("ws://" + location.host + "/ws")`), receives full state, renders SONG VIEW
-- [ ] SONG VIEW: lane list, vol/pan sliders, type badges, add/delete lane
-- [ ] Mute button per lane row: click toggles mute; red filled = muted, dim row; sends `WS_CMD_TOGGLE_MUTE`; updates instantly on `WS_MSG_LANE_UPDATE` broadcast
-- [ ] Drum grid: canvas-based, click toggle, right-click velocity, resolution selector, playhead anim you can take same formula as in device.
-- [ ] Piano roll: canvas-based, click to place/move/resize notes, zoom, snap grid, you can take same formula as in device.
-- [ ] Live play: drum pad buttons (mousedown/up), piano keyboard (touch+mouse)
-- [ ] ADSR sliders per lane
-- [ ] FX chain editor: add/remove/reorder/configure effects
-- [ ] Master section: vol, FX, levels, clock
-- [ ] Song browser: list/load/save/delete songs
-- [ ] Settings panel
-- [ ] [AUDIO ON/OFF] toggle: WS_CMD_AUDIO_STREAM, Web Audio API decode + play
-- [ ] Audio gap-free playback with 100 ms Web Audio scheduling buffer
-- [ ] Test: full round-trip — edit drum beat in browser while device screen shows live sync
+
+> **v2 Design — Web UI is a pixel-faithful mirror of the device UI.**
+> Use the **same CSS tokens** as the device (paste `v2/styles.css` into `index.html` `<style>`).
+> Use **canvas** for drum grid and piano roll with identical pixel math (same cell sizes, row heights, color constants as device C code).
+> Use **`<div>` flexbox** for the song view lane list, FX chain, master section — same proportions as device screens.
+> The web UI adapts to the browser viewport: on desktop it renders the full 1280×720 layout (centered/scaled); on mobile it fills the viewport naturally (same proportions work at phone screen density).
+> All interactions are **WS-only after initial load** — no HTTP requests. JS state is a read-only mirror updated only by incoming `WS_MSG_*` frames.
+>
+> **Key visual specs for web canvas implementations:**
+> - Drum grid: cell size = `(canvas.width - 164 - 0) / step_count`; row height = `(canvas.height - 48 - 72) / visible_rows`; colors: off=`#1C1C22`, on=`#C7F546`, accent=`#FFB547`, playhead col=`rgba(255,255,255,0.15)` overlay.
+> - Piano roll: key column 100 px; row height 42 px per semitone; note fill `rgba(199,245,70, vel/127 * 0.5 + 0.5)`; 3 px lime left border; playhead 2 px lime line with glow.
+> - Live drum pads: `#1C1C22` base, lime hit state with `box-shadow: 0 0 36px rgba(199,245,70,0.32)`, label 24 px bold mono.
+> - Live piano: white keys `#E8E8EC`, black keys `#0A0A0C`, active keys lime, octave labels at C in 16 px mono.
+
+- [x] `www/index.html`: single-file vanilla JS/CSS web app with v2 design tokens
+- [x] WebSocket auto-connects to `ws://` + `location.host` + `/ws`, reconnects on drop
+- [x] SONG VIEW: lane list (72 px rows), 6 px left color bars, mute toggle, vol fader, type chip, master strip + L/R meters
+- [x] Mute button: sends `WS_CMD_TOGGLE_MUTE`, dims row on `WS_MSG_LANE_UPDATE`
+- [x] Drum grid: `<canvas>` with 60 px cells, scrollable rows, beat header, playhead overlay on `WS_MSG_PLAYHEAD`, tap to toggle steps → `WS_CMD_SET_DRUM_STEP`
+- [x] Piano roll: `<canvas>` 18 px row height, 40 px key column, lime notes with velocity alpha, playhead, zoom/scroll toolbar
+- [x] ADSR sliders: range inputs for ATK/DCY/SUS/REL → `WS_CMD_SET_ADSR`
+- [x] Master tab: BPM input + TAP button, PPQN selector, AUDIO ON/OFF toggle
+- [x] Audio stream: Web Audio API scheduling buffer, `WS_CMD_AUDIO_STREAM`, PCM decode at 48 kHz, `WS_MSG_AUDIO_DROPPED` handler
+- [x] Upload + WiFi settings tabs retained from previous implementation
+- [ ] Test: full round-trip — edit drum beat in browser while device screen shows live sync; visual parity check vs device screenshots
 
 ### M10 — Mobile upload + sample cutter (1–2 sessions)
-- [ ] MENU → UPLOAD FILES screen: folder picker (`GET /sd/ls`), file input `<input type="file" accept=".wav" multiple>`, sequential upload via `POST /upload`, per-file progress bar
-- [ ] MENU → SAMPLE CUTTER screen: source file browser, waveform canvas, region handles
-- [ ] Waveform render: fetch source WAV (`GET /sd`), decode with `decodeAudioData()`, draw peak waveform on canvas
-- [ ] Region editing: click+drag to create region, drag handles to adjust start/end, tap to select, [✕] to delete
-- [ ] Region preview: play selected region in-browser from decoded AudioBuffer
-- [ ] [SAVE ALL CUTS]: slice AudioBuffer per region, encode each as 16-bit WAV (inline writer), upload each via `POST /upload?path=<dest-folder>`
-- [ ] Output folder: text input with `GET /sd/ls` autocomplete; [NEW FOLDER] creates it on first upload
+- [x] MENU → UPLOAD FILES screen: folder picker (`GET /sd/ls`), file input `<input type="file" accept=".wav" multiple>`, sequential upload via `POST /upload`, per-file progress bar
+- [x] MENU → SAMPLE CUTTER screen: source file browser, waveform canvas, region handles; CUTTER nav tab added
+- [x] Waveform render: fetch source WAV (`GET /sd`), decode with `decodeAudioData()`, draw peak waveform on canvas
+- [x] Region editing: click+drag to create region, drag handles to adjust start/end, tap to select, [✕] to delete
+- [x] Region preview: play selected region in-browser from decoded AudioBuffer
+- [x] [SAVE ALL CUTS]: slice AudioBuffer per region, encode each as 16-bit WAV (inline writer), upload each via `PUT /sounds/upload?path=<dest-folder>/<name>.wav`
+- [x] Output folder: text input defaulting to "cuts"; creates folder on first upload via mkdir_p in upload handler
 - [ ] Test: load a 10-second WAV, cut 4 regions, save — 4 files appear in sound browser
 - [ ] Test: upload 3 WAV files from iPhone Files app; all appear in correct folder on SD
 
 ### M11 — Polish + tuning (1 session)
 - [ ] CPU profiling: audio task < 60% core 1 at 120 BPM, 16 lanes, 1 WS audio client
-- [ ] Tap tempo (touch + web)
-- [ ] Mute/solo per lane
-- [ ] Long-press context menu (rename, duplicate, delete, move lane)
+- [x] Tap tempo (touch + web) — `WS_CMD_TRANSPORT action=2` → `clock_tap()` + `WS_MSG_CLOCK_UPDATE` broadcast
+- [x] Solo per lane — `volatile bool solo` in lane_t; audio pre-pass silences non-soloed lanes; `WS_CMD_TOGGLE_SOLO`; S button in web UI song view
+- [x] Mute per lane — already existed; now SOLO button also dims the row in anySolo mode
+- [x] Long-press context menu (rename, duplicate, delete) — 600 ms long-press + right-click; `WS_CMD_RENAME_LANE`, `WS_CMD_DUPLICATE_LANE`, `WS_CMD_DEL_LANE`
 - [ ] WiFi throughput test: 1 audio stream at 1.5 Mbps + concurrent control WS traffic
+
+### M12 — Web FX chain editor (1 session)
+- [x] `ser_fx_chain()` in ws_server.c — serialises all active FX slots for one lane; `FX_SER_SLOT_BYTES=35`; 3-byte header + slot×(slot_idx+type+enabled+8×f32)
+- [x] `WS_MSG_FX_UPDATE` wired in `ws_notify_change()` and `send_full_state()` — new clients and mutations both push FX state
+- [x] `WS_CMD_SET_FX` extended to 4 sub-commands: `sub=0` set params/enabled, `sub=1` insert by type, `sub=2` remove, `sub=3` move/swap; uses `fx_chain_insert/remove/move` from fx.h
+- [x] Web UI FX tab (`#s-fx`): lane selector via ⋮ button on each song view lane row → `openFxEditor(li)` → navigates to FX tab
+- [x] FX chain list: slot rows with type name, EN/OFF toggle, ✕ remove; expand row → param sliders for named params (per-type metadata table in `FX_PARAMS`)
+- [x] FX type picker: bottom-sheet modal lists all 45 FX_TYPE_* names; tap inserts at append slot
+- [x] State: `state.fx[li]` = array of `{slot, type, enabled, params[8]}`; decoded by `decodeFxChain()` on `WS_MSG_FX_UPDATE`; optimistic updates on insert/remove
+- [ ] Test: insert REVERB on a drum lane, adjust MIX param, verify audible on audio stream; insert DELAY, verify clock-sync tick fires
+
+### M13 — Web UI gap-fill: interactive screens + live play (1 session)
+
+- [x] Added missing CMD constants: `ADD_LANE(0x8E)`, `SAVE_SONG(0x89)`, `LOAD_SONG(0x8A)`, `NEW_SONG(0x8B)`, `LIST_SONGS(0x8C)`, `DRUM_ROW_ASSIGN(0x90)`, `SET_SYNTH(0x91)`, `NOTE_ON(0x92)`, `NOTE_OFF(0x93)`, `DRUM_TRIGGER(0x94)` to app.js CMD object
+- [x] Added missing MSG constants: `ADSR_UPDATE(0x06)`, `SONG_LIST(0x0A)`, `SYNTH_PARAMS(0x0E)` to app.js MSG object
+- [x] Piano roll note placement: `pointerdown` on `roll-canvas` → tap empty cell = `WS_CMD_ADD_NOTE` (snapped to 1/16th grid); 300 ms press on existing note = `WS_CMD_DEL_NOTE`
+- [x] Lane volume fader drag: `pointerdown`/`pointermove` on `.lane-fader` in song view → optimistic fill update → `WS_CMD_SET_LANE` with mask `0x02` on `pointerup`
+- [x] Master volume fader drag: pointer drag on `.master-fader` → `sendMasterVolume()` → `WS_CMD_SET_MASTER` `[cmd, f32 vol, f32 pan]`
+- [x] Add lane button: `[+ ADD LANE]` row at bottom of lane list → type picker overlay (DRUM/SYNTH/WAV) → `WS_CMD_ADD_LANE`
+- [x] Song management tab (`#s-songs`): SAVE/NEW/REFRESH buttons → `sendSaveSong()`, `sendNewSong()`, `requestSongList()`; `SONG_LIST` handler updates `songList[]` and `renderSongList()`
+- [x] `WS_MSG_ADSR_UPDATE(0x06)` handler: decodes `[type, lane, f32×4]` and updates ADSR sliders if lane matches `selected_lane`
+- [x] LIVE play tab (`#s-live`): `renderLive()` builds per-lane widgets — drum pads (`WS_CMD_DRUM_TRIGGER`) for DRUM lanes, 2-octave canvas piano (`WS_CMD_NOTE_ON`/`NOTE_OFF`) for SYNTH lanes
+- [x] Drum row assignment: tap row label in drum grid → `openDrumRowFilePicker()` → file list from `/sd/ls` → `WS_CMD_DRUM_ROW_ASSIGN`; row label shows sample basename
+- [x] Synth params tab (`#s-synth`): `openSynthEditor(li)` → renders type picker + calls `WS_CMD_SET_SYNTH`; `SYNTH_PARAMS` handler updates `state.synthParams[li]`; SYNTH button in piano roll toolbar
+- [x] New nav tabs added: LIVE (index 5) and SONGS (index 8)
+- [x] New HTML sections added: `#s-live`, `#s-synth`, `#s-songs`
+- [x] CSS additions: `.add-lane-row`, `.live-lane`, `.live-pad`, `.live-piano-wrap`, `.live-piano-canvas`, `.live-oct-row`
 
 ---
 
