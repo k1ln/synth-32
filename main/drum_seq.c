@@ -65,17 +65,61 @@ void drum_seq_update_timing(drum_seq_t *seq, uint32_t loop_len_ticks)
     seq->ticks_per_step = loop_len_ticks / seq->step_count;
 }
 
+void drum_seq_set_step_count(drum_seq_t *seq, uint8_t new_sc, uint32_t loop_len_ticks)
+{
+    if (!seq) return;
+    if (new_sc < 4)              new_sc = 4;
+    if (new_sc > DRUM_MAX_STEPS) new_sc = DRUM_MAX_STEPS;
+
+    uint8_t old_sc = seq->step_count ? seq->step_count : 16;
+    if (new_sc != old_sc) {
+        for (int r = 0; r < seq->row_count; r++) {
+            drum_row_t *row = &seq->rows[r];
+            /* Scale this row by the same ratio as the global grid so polyrhythm
+             * rows keep their relationship to the bar. */
+            uint8_t r_old = row->step_count ? row->step_count : old_sc;
+            int r_new = ((int)r_old * new_sc) / old_sc;
+            if (r_new < 1)              r_new = 1;
+            if (r_new > DRUM_MAX_STEPS) r_new = DRUM_MAX_STEPS;
+
+            /* Stretch: drop each existing hit into the slot that lands at the
+             * same point in time on the new grid; in-between slots stay empty. */
+            drum_step_t tmp[DRUM_MAX_STEPS];
+            memset(tmp, 0, sizeof(tmp));
+            for (int v = 0; v < r_old && v < DRUM_MAX_STEPS; v++) {
+                if (row->steps[v].velocity == 0) continue;
+                int dst = ((int)v * r_new) / r_old;
+                if (dst >= r_new) dst = r_new - 1;
+                tmp[dst] = row->steps[v];
+            }
+            memcpy(row->steps, tmp, sizeof(row->steps));
+            row->step_count = (uint8_t)r_new;
+        }
+        seq->step_count = new_sc;
+    }
+    drum_seq_update_timing(seq, loop_len_ticks);
+}
+
 void drum_seq_reset(drum_seq_t *seq, uint32_t lane_tick_now)
 {
-    uint8_t sc = seq->step_count ? seq->step_count : 16;
-    /* Set to one-before-first so the first tick increment lands on step 0 */
+    uint8_t  sc  = seq->step_count ? seq->step_count : 16;
+    uint32_t tps = seq->ticks_per_step;
+    /* current_step = one-before-first, and last_step_tick is back-dated by one
+     * step (unsigned wrap is intentional and handled by the subtraction in
+     * drum_seq_tick) so the FIRST tick after a (re)start fires step 0 right at
+     * the loop origin. Without the back-date the first step lands one step
+     * late, which pushes the final step onto the loop boundary where the next
+     * loop restart pre-empts it — that is why the last step never played. */
     seq->current_step   = sc - 1;
-    seq->last_step_tick = lane_tick_now;
+    seq->last_step_tick = lane_tick_now - tps;
     seq->bar_count      = 0;
     for (int r = 0; r < seq->row_count; r++) {
-        uint8_t rs = seq->rows[r].step_count ? seq->rows[r].step_count : sc;
+        uint8_t  rs    = seq->rows[r].step_count ? seq->rows[r].step_count : sc;
+        uint32_t r_tps = (seq->rows[r].step_count && seq->rows[r].step_count != sc)
+                         ? (tps * sc / rs) : tps;
+        if (r_tps == 0) r_tps = tps;
         seq->rows[r].current_step   = rs - 1;
-        seq->rows[r].last_step_tick = lane_tick_now;
+        seq->rows[r].last_step_tick = lane_tick_now - r_tps;
         seq->rows[r].pass_count     = 0;
     }
     memset(seq->mute_group_last, 0xFF, sizeof(seq->mute_group_last));
@@ -258,6 +302,22 @@ static void trigger_row(drum_row_t *row, uint8_t velocity, bool accent, float ac
     row->multi_next_tick = 0;   /* caller will set absolute tick below */
 }
 
+void drum_seq_trigger_row(drum_seq_t *seq, int ri, uint8_t velocity)
+{
+    if (!seq || ri < 0 || ri >= seq->row_count) return;
+    drum_row_t *row = &seq->rows[ri];
+    if (row->mute) return;
+
+    trigger_row(row, velocity ? velocity : 100, false, seq->accent_gain);
+
+    /* Suppress the multi-hit chain for live hits: trigger_row reset multi_idx
+     * to 0, which would make the chain advance loop fire every chained hit at
+     * once (lane_tick can be static while transport is stopped). Mark the chain
+     * complete so only the primary sample sounds. */
+    row->multi_idx       = row->multi_hit_count;
+    row->multi_next_tick = 0;
+}
+
 /* ── Condition check ─────────────────────────────────────────────────────── */
 
 static bool step_condition_ok(const drum_step_t *step, uint8_t pass, uint8_t phrase_len)
@@ -278,15 +338,21 @@ static bool step_condition_ok(const drum_step_t *step, uint8_t pass, uint8_t phr
 void drum_seq_tick(drum_seq_t *seq, uint32_t lane_tick, uint32_t tick_delta,
                    int32_t *out_l, int32_t *out_r, int n_frames)
 {
-    if (!seq || seq->step_count == 0 || seq->ticks_per_step == 0) return;
+    if (!seq) return;
 
     uint32_t tps       = seq->ticks_per_step;
     uint8_t  phrase    = seq->phrase_len ? seq->phrase_len : 4;
+
+    /* Sequencer step advance only runs when timing is set up; the ring drain
+     * at the end always runs so LIVE finger-drum hits sound even while the
+     * transport is stopped (or before the loop length is configured). */
+    bool seq_running = (seq->step_count != 0 && seq->ticks_per_step != 0);
 
     bool any_solo = false;
     for (int r = 0; r < seq->row_count; r++)
         if (seq->rows[r].solo) { any_solo = true; break; }
 
+  if (seq_running) {
     /* ── Per-row step advance (supports polyrhythm via row->step_count) ─── */
     for (int r = 0; r < seq->row_count; r++) {
         drum_row_t *row = &seq->rows[r];
@@ -396,6 +462,7 @@ void drum_seq_tick(drum_seq_t *seq, uint32_t lane_tick, uint32_t tick_delta,
             }
         }
     }
+  } /* seq_running */
 
     /* ── Drain active rings into output bus ─────────────────────────────── */
     bool any_solo_drain = false;

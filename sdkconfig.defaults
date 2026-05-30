@@ -13,6 +13,11 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_100=y
 
+# Main task runs the boot song_load, which preloads drum WAVs into PSRAM. That
+# path uses >3 KB of stack (native[] resample scratch + read buffers), so the
+# 3584-byte default overflows. Match the HTTP/UI tasks that also run preloads.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # Display — 5-inch 720x1280 (HX8394, MIPI-DSI), double-buffered for flicker-free updates
 CONFIG_BSP_LCD_TYPE_720_1280_5_INCH_A=y
 CONFIG_BSP_LCD_DPI_BUFFER_NUMS=2

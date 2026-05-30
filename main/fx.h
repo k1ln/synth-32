@@ -122,6 +122,9 @@ typedef struct {
 /* Lane ADSR */
 void lane_adsr_init(lane_adsr_t *a, float atk_ms, float dcy_ms,
                     float sus, float rel_ms);
+/* Update params + derived rates in place (live edit; preserves stage/level). */
+void lane_adsr_set_params(lane_adsr_t *a, float atk_ms, float dcy_ms,
+                          float sus, float rel_ms);
 void lane_adsr_gate_on(lane_adsr_t *a);
 void lane_adsr_gate_off(lane_adsr_t *a);
 /* Apply envelope to int16 L/R buffers in place; returns peak |level|. */

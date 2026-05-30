@@ -78,6 +78,7 @@ static bool drum_row_ok(int li, int ri)
  *  f32 pan         (if mask & 4)
  *  u32 loop_len    (if mask & 8)
  *  [128] wav_path  (if mask & 16)
+ *  u8  drum_step_count (if mask & 32)
  */
 static void cmd_set_lane(const uint8_t *p, size_t len, int sender_fd)
 {
@@ -112,6 +113,10 @@ static void cmd_set_lane(const uint8_t *p, size_t len, int sender_fd)
                 if (l->wav_lane) l->wav_lane->active = true;
             }
         }
+    }
+    if ((mask & 0x20) && off < len && l->drum_seq) {
+        /* Drum step count: rescale the pattern so hits keep their timing. */
+        drum_seq_set_step_count(l->drum_seq, p[off++], l->loop_len_ticks);
     }
     g_song.dirty = true;
     ws_notify_except(WS_MSG_LANE_UPDATE, li, sender_fd);
@@ -335,10 +340,8 @@ static void cmd_set_adsr(const uint8_t *p, size_t len)
     int li = p[0];
     if (!lane_ok(li)) return;
     lane_adsr_t *a = &g_song.lanes[li].adsr;
-    a->atk_ms = rd_f32(p + 1);
-    a->dcy_ms = rd_f32(p + 5);
-    a->sus    = clampf(rd_f32(p + 9),  0.0f, 1.0f);
-    a->rel_ms = rd_f32(p + 13);
+    lane_adsr_set_params(a, rd_f32(p + 1), rd_f32(p + 5),
+                         clampf(rd_f32(p + 9), 0.0f, 1.0f), rd_f32(p + 13));
     g_song.dirty = true;
     ws_notify_change(WS_MSG_ADSR_UPDATE, li);
 }
@@ -590,10 +593,9 @@ static void cmd_note_off(const uint8_t *p, size_t len)
  *  u8 row_idx
  *  u8 velocity
  *
- * Live drum trigger: sets the next step for this row to the given velocity
- * so the sequencer fires it on the next tick.  A proper one-shot trigger
- * API would require access to drum_seq internals (the static trigger_row());
- * that can be added later.  For now we force the current step on.
+ * Live drum trigger: immediately fires the row's sample (one-shot), routed
+ * through the row's volume/pan and the lane FX chain. Works whether or not
+ * the transport is running, so the LIVE pads feel like real finger-drumming.
  */
 static void cmd_drum_trigger(const uint8_t *p, size_t len)
 {
@@ -601,10 +603,7 @@ static void cmd_drum_trigger(const uint8_t *p, size_t len)
     int li = p[0], ri = p[1];
     uint8_t vel = p[2];
     if (!drum_row_ok(li, ri)) return;
-    drum_row_t  *row = &g_song.lanes[li].drum_seq->rows[ri];
-    uint8_t      si  = g_song.lanes[li].drum_seq->current_step;
-    row->steps[si].velocity = vel;
-    /* Note: does not persist — this is live play only */
+    drum_seq_trigger_row(g_song.lanes[li].drum_seq, ri, vel);
 }
 
 /* WS_CMD_SET_FX  [variable]
@@ -627,8 +626,9 @@ static void cmd_drum_trigger(const uint8_t *p, size_t len)
  *  u8  src_slot
  *  u8  dst_slot
  */
-/* lane index 0xFF is the master bus FX chain */
+/* lane index 0xFF is the master bus FX chain; 0xFE is the send-bus chain */
 #define MASTER_FX_IDX 0xFF
+#define SEND_FX_IDX   0xFE
 
 static void cmd_set_fx(const uint8_t *p, size_t len)
 {
@@ -642,6 +642,9 @@ static void cmd_set_fx(const uint8_t *p, size_t len)
     if ((uint8_t)li == MASTER_FX_IDX) {
         chain = g_song.master_fx;
         count = &g_song.master_fx_count;
+    } else if ((uint8_t)li == SEND_FX_IDX) {
+        chain = g_song.send_fx;
+        count = &g_song.send_fx_count;
     } else {
         if (!lane_ok(li)) return;
         chain = g_song.lanes[li].fx;

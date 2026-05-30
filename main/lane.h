@@ -16,6 +16,7 @@
 #include "clock.h"
 #include "synth.h"
 #include "drum_seq.h"
+#include "drum_synth.h"
 #include "piano_roll.h"
 #include "arp.h"
 #include "lfo.h"
@@ -73,6 +74,7 @@ typedef enum {
     LANE_TYPE_WAV   = 0,   /* streams a WAV file from SD, one-shot / loop   */
     LANE_TYPE_DRUM,        /* step sequencer with per-row samples            */
     LANE_TYPE_SYNTH,       /* procedural synth voice + piano roll            */
+    LANE_TYPE_DRUMSYNTH,   /* analog 808-style drum synth + step grid        */
 } lane_type_t;
 
 /* ── Lane ────────────────────────────────────────────────────────────────── */
@@ -97,6 +99,9 @@ typedef struct {
 
     /* ── Drum sequencer (LANE_TYPE_DRUM) ─────────────────────────────── */
     drum_seq_t      *drum_seq;
+
+    /* ── Analog drum synth (LANE_TYPE_DRUMSYNTH) ─────────────────────── */
+    dsyn_t          *dsyn;
 
     /* ── Synth + piano roll (LANE_TYPE_SYNTH) ────────────────────────── */
     synth_inst_t    *synth;

@@ -85,10 +85,11 @@ void draw_type_chip(int x, int y, lane_type_t type)
     const char *label;
     uint16_t fg, bg;
     switch (type) {
-    case LANE_TYPE_DRUM:  label = "DRUM";  fg = C_LIME;  bg = C_LIME_DIM; break;
-    case LANE_TYPE_SYNTH: label = "SYNTH"; fg = C_CYAN;  bg = 0x0240u;    break;
-    case LANE_TYPE_WAV:   label = "WAV";   fg = C_AMBER; bg = 0x2040u;    break;
-    default:              return;
+    case LANE_TYPE_DRUM:      label = "DRUM";  fg = C_LIME;  bg = C_LIME_DIM; break;
+    case LANE_TYPE_DRUMSYNTH: label = "808";   fg = C_RED; bg = 0x3000u;  break;
+    case LANE_TYPE_SYNTH:     label = "SYNTH"; fg = C_CYAN;  bg = 0x0240u;    break;
+    case LANE_TYPE_WAV:       label = "WAV";   fg = C_AMBER; bg = 0x2040u;    break;
+    default:                  return;
     }
     int tw = gfx_text_width(label, 2);
     gfx_fill_round_rect(x, y, tw + 24, 36, 4, bg);
@@ -98,10 +99,11 @@ void draw_type_chip(int x, int y, lane_type_t type)
 uint16_t lane_accent(lane_type_t t)
 {
     switch (t) {
-    case LANE_TYPE_DRUM:  return C_LIME;
-    case LANE_TYPE_SYNTH: return C_CYAN;
-    case LANE_TYPE_WAV:   return C_AMBER;
-    default:              return C_T2;
+    case LANE_TYPE_DRUM:      return C_LIME;
+    case LANE_TYPE_DRUMSYNTH: return C_RED;
+    case LANE_TYPE_SYNTH:     return C_CYAN;
+    case LANE_TYPE_WAV:       return C_AMBER;
+    default:                  return C_T2;
     }
 }
 
@@ -264,6 +266,11 @@ void draw_live_piano_key(int k)
 void draw_screen(void)
 {
     screen_id_t scr = current_screen();
+    /* Wait for the previous frame to latch before overwriting the back buffer.
+     * This block was moved out of gfx_commit() so the UI loop can keep polling
+     * touch and firing notes during the panel-latch window instead of stalling
+     * there — see gfx_wait_present(). */
+    gfx_wait_present();
     gfx_fill_screen(C_BG1);
 
     if (is_main_screen(scr)) {

@@ -44,6 +44,7 @@ bool        is_main_screen(screen_id_t scr);
 /* ── Live / piano state (ui.c) ───────────────────────────────────────────── */
 extern int      s_live_lane;
 extern int      s_live_octave;
+extern int      s_live_pad_page;   /* current page of LIVE drum pads (8/page) */
 
 extern const int s_wk_semi[7];
 extern const int s_bk_semi[5];
@@ -59,13 +60,29 @@ extern int  s_drag_fader;
 extern int  s_dg_long_row, s_dg_long_step, s_dg_hold_ms;
 extern int  s_dg_row_offset;   /* first visible row in drum grid */
 extern int  s_fx_sel_slot;
+/* FX edit target for the FX_ADSR screen: a lane index, or one of these. */
+#define FX_TGT_MASTER 255
+#define FX_TGT_SEND   254
+extern int  s_fx_target;               /* lane idx, FX_TGT_MASTER, or FX_TGT_SEND */
 /* FX type picker overlay (FX_ADSR screen) */
 extern bool s_fx_picker_open;
 extern int  s_fx_picker_target_slot;   /* slot to insert into when a type is chosen */
+extern bool s_fx_picker_replace;       /* true = replace existing slot, false = insert */
 extern int  s_fx_picker_scroll;        /* scroll row offset in the picker grid */
 /* FX param-slider drag (FX_ADSR screen) */
 extern int  s_fx_param_drag;           /* param index 0–7 being dragged, -1 = none */
+/* Lane ADSR knob drag (FX_ADSR screen) */
+extern int  s_fx_adsr_drag;            /* 0=A 1=D 2=S 3=R being dragged, -1 = none */
+extern float s_fx_adsr_drag_start;     /* value at drag start */
+extern int  s_fx_adsr_drag_y;          /* finger y at drag start */
 extern int  s_sb_kit_sel, s_sb_file_sel;
+
+/* Resolve an FX target to its chain. *out_count receives the count pointer;
+ * *out_adsr receives the lane ADSR (NULL for master/send); *out_notify the
+ * WS_MSG_FX_UPDATE idx (lane / 0xFF / 0xFE). Returns the chain array. */
+fx_node_t **fx_target_resolve(int target, int **out_count,
+                              lane_adsr_t **out_adsr, int *out_notify);
+const char *fx_target_title(int target);
 
 /* ── Real sound browser (ui.c) ───────────────────────────────────────────── */
 extern int   s_sb_kit_count, s_sb_kit_scroll;

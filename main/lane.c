@@ -19,6 +19,8 @@ void lane_restart(lane_t *lane)
 {
     if (lane->type == LANE_TYPE_DRUM && lane->drum_seq)
         drum_seq_reset(lane->drum_seq, lane->lane_tick);
+    else if (lane->type == LANE_TYPE_DRUMSYNTH && lane->dsyn)
+        dsyn_reset(lane->dsyn, lane->lane_tick);
     else if (lane->type == LANE_TYPE_SYNTH && lane->piano_roll)
         piano_roll_reset(lane->piano_roll);
     else if (lane->type == LANE_TYPE_WAV && lane->wav_lane_slot >= 0) {

@@ -1141,18 +1141,31 @@ function sendDrumRowAssign(li, ri, path) {
 
 function sendDrumStepCount(count) {
   if (selected_lane < 0) return;
-  // SET_LANE mask=0x08 (loop_len_ticks) repurposed? Actually firmware uses SET_DRUM_STEP meta.
-  // Send via SET_LANE with mask=0x20 (step_count extension) — update rows client-side too
+  // SET_LANE mask=0x20 (drum step_count, u8). The firmware rescales every row's
+  // pattern so existing hits keep their position in time (stretch), so mirror
+  // that here by remapping the client-side rows the same way.
   if (state.drum[selected_lane]) {
-    state.drum[selected_lane].rows.forEach(row => { row.step_count = count; });
+    state.drum[selected_lane].rows.forEach(row => {
+      const oldSc = row.step_count || 16;
+      const oldSteps = row.steps || [];
+      const newSteps = new Array(count).fill(0);
+      for (let v = 0; v < oldSc; v++) {
+        if (!oldSteps[v]) continue;
+        let dst = Math.floor(v * count / oldSc);
+        if (dst >= count) dst = count - 1;
+        newSteps[dst] = oldSteps[v];
+      }
+      row.steps = newSteps;
+      row.step_count = count;
+    });
   }
-  // Encode as WS command: reuse SET_DRUM_STEP with ri=0xFF as meta signal if supported,
-  // or simply update loop_len to match new step count × step duration
-  const bar_t = (state.ppqn || 96) * (state.beats || 4);
-  const l = state.lanes[selected_lane];
-  const bars = l && l.loop_len ? Math.round(l.loop_len / bar_t) : 2;
-  const loop_len = bars * bar_t;
-  sendDrumLoopLen(loop_len);
+  const buf = new ArrayBuffer(4);
+  const dv  = new DataView(buf);
+  dv.setUint8(0, CMD.SET_LANE);
+  dv.setUint8(1, selected_lane);
+  dv.setUint8(2, 0x20);
+  dv.setUint8(3, count & 0xFF);
+  wsSend(buf);
   renderDrumGrid();
 }
 
@@ -1739,11 +1752,12 @@ const FX_PARAMS = {
 let fxLaneIdx = -1;    // lane currently shown in FX editor
 let fxExpanded = -1;   // slot whose params are expanded (-1 = none)
 let fxPickSlot = -1;   // pending insert slot for picker
+let fxPickReplace = false; // true = picker swaps the slot's type instead of inserting
 
 function decodeFxChain(dv, len) {
   if (len < 3) return;
   const li = dv.getUint8(1);
-  if (li !== 255 && li >= NUM_LANES) return;
+  if (li !== 255 && li !== 254 && li >= NUM_LANES) return;
   const count = dv.getUint8(2);
   const FX_SLOT_BYTES = 1 + 1 + 1 + 32;
   const slots = [];
@@ -1769,7 +1783,8 @@ function decodeFxChain(dv, len) {
 function openFxEditor(li) {
   fxLaneIdx = li;
   fxExpanded = -1;
-  document.getElementById('fx-lane-name').textContent = li === 255 ? 'MASTER' : laneName(li);
+  document.getElementById('fx-lane-name').textContent =
+    li === 255 ? 'MASTER' : li === 254 ? 'SEND' : laneName(li);
   nav('fx', document.querySelectorAll('.nav-tab')[4]);
   renderFxChain();
 }
@@ -1790,8 +1805,9 @@ function renderFxChain() {
     row.innerHTML =
       `<span class="fx-slot-idx">${fx.slot + 1}</span>` +
       `<span class="fx-slot-name" style="cursor:pointer" onclick="fxToggleExpand(${fx.slot})">${name}</span>` +
+      `<button class="fx-en-btn" onclick="fxChangeSlot(${fx.slot})">CHANGE</button>` +
       `<button class="fx-en-btn${fx.enabled ? ' on' : ''}" onclick="fxSetEnabled(${fx.slot},${!fx.enabled})">${fx.enabled ? 'ON' : 'OFF'}</button>` +
-      `<button class="fx-rm-btn" onclick="fxRemove(${fx.slot})">✕</button>`;
+      `<button class="fx-rm-btn" onclick="fxRemove(${fx.slot})">DELETE</button>`;
     list.appendChild(row);
 
     // Param panel (expanded only)
@@ -1890,11 +1906,22 @@ function fxAddSlot() {
   if (fxLaneIdx < 0) return;
   const chain = state.fx[fxLaneIdx] || [];
   fxPickSlot = chain.length; // append
+  fxPickReplace = false;
+  openFxPicker();
+}
+
+// Re-open the picker to swap the effect type at an existing slot
+function fxChangeSlot(slot) {
+  if (fxLaneIdx < 0) return;
+  fxPickSlot = slot;
+  fxPickReplace = true;
   openFxPicker();
 }
 
 // FX type picker bottom sheet
 function openFxPicker() {
+  const title = document.querySelector('#fx-picker-inner .sh');
+  if (title) title.textContent = fxPickReplace ? 'CHANGE EFFECT' : 'CHOOSE EFFECT';
   const list = document.getElementById('fx-pick-list');
   list.innerHTML = '';
   FX_TYPE_NAMES.forEach((name, typeId) => {
@@ -1902,7 +1929,11 @@ function openFxPicker() {
     const div = document.createElement('div');
     div.className = 'fx-pick-item';
     div.textContent = name;
-    div.onclick = () => { closeFxPicker(); fxInsert(fxPickSlot, typeId); };
+    div.onclick = () => {
+      closeFxPicker();
+      if (fxPickReplace) fxReplace(fxPickSlot, typeId);
+      else               fxInsert(fxPickSlot, typeId);
+    };
     list.appendChild(div);
   });
   document.getElementById('fx-picker').classList.add('open');
@@ -1925,6 +1956,19 @@ function fxInsert(slot, typeId) {
   chain.forEach((f, i) => { f.slot = i; });
   renderFxChain();
   wsSend(new Uint8Array([CMD.SET_FX, fxLaneIdx, 1, slot, typeId]).buffer); // sub=insert
+}
+
+function fxReplace(slot, typeId) {
+  if (fxLaneIdx < 0) return;
+  const chain = state.fx[fxLaneIdx];
+  if (!chain || slot < 0 || slot >= chain.length) return;
+  // Optimistic: swap the node type in place, reset params
+  chain[slot] = { slot, type: typeId, enabled: true, params: new Array(8).fill(0) };
+  if (fxExpanded === slot) fxExpanded = -1;
+  renderFxChain();
+  // Remove old node then insert the new type at the same position
+  wsSend(new Uint8Array([CMD.SET_FX, fxLaneIdx, 2, slot]).buffer);          // sub=remove
+  wsSend(new Uint8Array([CMD.SET_FX, fxLaneIdx, 1, slot, typeId]).buffer);  // sub=insert
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

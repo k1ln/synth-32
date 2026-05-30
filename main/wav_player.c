@@ -259,11 +259,42 @@ static void sd_stream_task(void *arg)
 
 /* ── Engine init ─────────────────────────────────────────────────────────── */
 
-void wav_engine_init(void)
+/* Wire up the lane pointer table. Idempotent and free of any task/SD work, so
+ * it can run very early — before the boot song_load preloads drum samples,
+ * which needs s_lanes[] populated to hand out slots. (Previously this lived in
+ * wav_engine_init, called after song_load, so boot-time drum preloads silently
+ * failed: wav_lane_get() returned NULL → empty buffers → no drum playback.) */
+void wav_pool_init(void)
 {
     for (int i = 0; i < WAV_MAX_LANES; i++) {
         s_lanes[i] = &s_lane_storage[i];
     }
+}
+
+/* Release every slot back to the allocator: stop playback, free preload
+ * buffers, and rewind the monotonic slot counter. Called by song_load before
+ * building the new song so reloading doesn't leak slots until the pool is
+ * exhausted (lane_reset only memsets lanes, it never frees their wav slots). */
+void wav_pool_reset(void)
+{
+    for (int i = 0; i < WAV_MAX_LANES; i++) {
+        wav_lane_t *ln = s_lanes[i];
+        if (!ln) continue;
+        ln->active = false;
+        if (ln->wav.fp) { fclose(ln->wav.fp); ln->wav.fp = NULL; }
+        if (ln->pcm_buf) {
+            heap_caps_free(ln->pcm_buf);
+            ln->pcm_buf    = NULL;
+            ln->pcm_frames = 0;
+            ln->pcm_pos    = 0;
+        }
+    }
+    s_next_slot = 0;
+}
+
+void wav_engine_init(void)
+{
+    wav_pool_init();
     xTaskCreatePinnedToCore(sd_stream_task, "sd_stream", 8192, NULL, 10, NULL, 0);
     ESP_LOGI(TAG, "WAV engine ready, %d lanes in PSRAM", WAV_MAX_LANES);
 }

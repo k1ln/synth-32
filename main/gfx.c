@@ -29,6 +29,7 @@ esp_lcd_panel_handle_t g_dpi_panel = NULL;
 static void          *s_fb[2]      = {};     /* [0] and [1] framebuffer pointers */
 static int            s_back_idx   = 0;      /* index of current back buffer */
 static SemaphoreHandle_t s_vsync_sem = NULL;
+static volatile bool  s_present_pending = false; /* a frame is awaiting its latch */
 
 #define BL_GPIO_FALLBACK GPIO_NUM_26
 
@@ -287,17 +288,59 @@ void lcd_register_refresh_cb(void)
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(g_dpi_panel, &cbs, s_vsync_sem));
 }
 
+/* Block until the panel has latched the most recently presented frame, so the
+ * back buffer we are about to draw into is no longer being scanned out.
+ *
+ * This is the deferred second half of gfx_commit(): instead of blocking on
+ * vsync *inside* gfx_commit(), the wait is moved to the start of the NEXT frame.
+ * That frees the UI task to poll the touch panel and dispatch note events during
+ * the ~one frame the panel needs to latch, instead of stalling there. With the
+ * redraw capped to ~33 ms and the panel refreshing faster than that, the give
+ * has almost always already arrived by the next frame, so during live playing
+ * this returns immediately and touch keeps sampling at the loop rate. */
+void gfx_wait_present(void)
+{
+    if (s_present_pending && s_vsync_sem) {
+        xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(34));
+        s_present_pending = false;
+    }
+}
+
+/* Index of the buffer drawing currently targets (== g_fb). The other buffer is
+ * the one being scanned out. Lets callers track per-buffer state so incremental
+ * updates (e.g. piano-key highlights) can be applied tear-free to the back
+ * buffer and presented via swap, instead of writing into the scanned buffer. */
+int gfx_back_index(void) { return s_back_idx; }
+
+/* Non-blocking variant of gfx_wait_present(): returns true and clears the
+ * pending flag if the previously presented frame has latched (so the back buffer
+ * is free to draw into), false if it is still pending. Never blocks, so the
+ * caller's touch poll keeps running while a present is in flight. */
+bool gfx_present_ready(void)
+{
+    if (!s_present_pending) return true;
+    if (s_vsync_sem && xSemaphoreTake(s_vsync_sem, 0) == pdTRUE) {
+        s_present_pending = false;
+        return true;
+    }
+    return false;
+}
+
 void gfx_commit(void)
 {
     if (!g_fb) return;
+    /* Drop any stale "refresh done" give so the deferred gfx_wait_present()
+     * blocks on the refresh that latches THIS frame, not an earlier one. */
+    if (s_vsync_sem) xSemaphoreTake(s_vsync_sem, 0);
     /* Pass the back buffer pointer to draw_bitmap. The driver detects that it
      * lives inside its own fb array and flips cur_fb_index to it without any
-     * copy — the display starts scanning this buffer at the next vsync.
-     * We then switch g_fb to the OLD front buffer so the next frame is drawn
-     * there (it is now off-screen and safe to overwrite). */
+     * copy — the display starts scanning this buffer at the next vsync. */
     esp_lcd_panel_draw_bitmap(g_dpi_panel, 0, 0, LCD_PW, LCD_PH, g_fb);
-    if (s_vsync_sem) xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(34));
-    /* Swap: next draw target is the buffer that just became the front */
+    s_present_pending = true;
+    /* Swap g_fb to the OLD front buffer so the next frame is drawn there. It may
+     * still be scanning until the next vsync, so we must NOT draw into it until
+     * gfx_wait_present() (called at the top of the next frame) confirms the
+     * latch. */
     s_back_idx ^= 1;
     g_fb = (uint16_t *)s_fb[s_back_idx];
 }

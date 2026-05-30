@@ -59,8 +59,21 @@ void lcd_init(void);
  * Must be called after lcd_init(). */
 void lcd_register_refresh_cb(void);
 
-/* Flush framebuffer to display and wait for vsync. */
+/* Present the framebuffer to the display (non-blocking — the vsync wait is
+ * deferred to gfx_wait_present() at the start of the next frame). */
 void gfx_commit(void);
+
+/* Block until the previously presented frame has been latched by the panel, so
+ * the back buffer is safe to draw into. Call once at the top of each frame,
+ * before drawing. */
+void gfx_wait_present(void);
+
+/* Index of the buffer drawing targets (the back buffer). */
+int gfx_back_index(void);
+
+/* Non-blocking check that the previous present has latched (back buffer free to
+ * draw into). Clears the pending flag and returns true when ready. */
+bool gfx_present_ready(void);
 
 /* ── Draw primitives ─────────────────────────────────────────────────────── */
 void     gfx_fill_rect      (int x, int y, int w, int h, uint16_t col);

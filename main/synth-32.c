@@ -63,6 +63,11 @@ void app_main(void)
      * wav_engine_init — PSRAM ring alloc + sd_stream_task on core 0
      *   (called after audio_init so the PSRAM heap is fully settled)
      * ───────────────────────────────────────────────────────────────────── */
+    /* Wire up the WAV lane pool table before any song load so drum-row sample
+     * preloads can claim slots. The sd_stream_task is still spawned later via
+     * wav_engine_init() (deferred to avoid preempting this init sequence). */
+    wav_pool_init();
+
     /* song_new() applies settings BPM/PPQN/bpb; auto-reload last song if set */
     song_new();
     if (g_settings.last_song[0] != '\0') {

@@ -372,23 +372,75 @@ static void draw_live_lane_tabs(void)
     }
 }
 
-static void draw_live_pad_grid(void)
+static void draw_live_pad_grid(int li)
 {
-    int pad_y = CONTENT_Y + LIVE_LANE_TAB_H + LIVE_PAD_PAD;
-    int pad_area_h = TABBAR_Y - pad_y - LIVE_PAD_PAD;
-    int pad_w = (1280 - LIVE_PAD_PAD * 5) / 4;
-    int pad_h = (pad_area_h - LIVE_PAD_GAP) / 2;
+    drum_seq_t *seq = g_song.lanes[li].drum_seq;
+    int body_y = CONTENT_Y + LIVE_LANE_TAB_H;
+    int body_h = TABBAR_Y - body_y;
+    gfx_fill_rect(0, body_y, 1280, body_h, C_BG1);
 
-    static const char *PAD_NAMES[8] = {
-        "KICK","SNARE","HH-CL","HH-OP","CLAP","TOM","RIDE","CRASH"
-    };
-    for (int i = 0; i < 8; i++) {
-        int col = i % 4, row = i / 4;
-        int px = LIVE_PAD_PAD + col * (pad_w + LIVE_PAD_GAP);
-        int py = pad_y + row * (pad_h + LIVE_PAD_GAP);
-        gfx_fill_round_rect(px, py, pad_w, pad_h, 12, C_BG3);
-        gfx_draw_round_rect(px, py, pad_w, pad_h, 12, C_LINE2);
-        draw_text_centred(px, py, pad_w, pad_h, PAD_NAMES[i], C_T0, C_BG3, 3);
+    /* One pad per assigned sample in this lane's song row. */
+    int rows[DRUM_MAX_ROWS];
+    int npads = live_drum_collect(seq, rows, DRUM_MAX_ROWS);
+    if (npads == 0) {
+        draw_text_centred(0, body_y, 1280, body_h,
+                          "NO SAMPLES \xe2\x80\x94 ASSIGN IN DRUM EDITOR",
+                          C_T3, C_BG1, 2);
+        return;
+    }
+
+    int pages    = (npads + LIVE_PAD_PER_PAGE - 1) / LIVE_PAD_PER_PAGE;
+    bool has_bar = pages > 1;
+    if (s_live_pad_page >= pages) s_live_pad_page = pages - 1;
+    if (s_live_pad_page < 0)      s_live_pad_page = 0;
+
+    int base = s_live_pad_page * LIVE_PAD_PER_PAGE;
+    for (int slot = 0; slot < LIVE_PAD_PER_PAGE; slot++) {
+        int idx = base + slot;
+        if (idx >= npads) break;
+        int r = rows[idx];
+        drum_row_t *row = &seq->rows[r];
+        int px, py, pw, ph;
+        live_drum_pad_rect(has_bar, slot, &px, &py, &pw, &ph);
+
+        bool muted = row->mute;
+        uint16_t bg = muted ? C_BG2 : C_BG3;
+        gfx_fill_round_rect(px, py, pw, ph, 12, bg);
+        gfx_draw_round_rect(px, py, pw, ph, 12, muted ? C_LINE2 : C_LIME_DIM);
+
+        /* Row number badge (top-left). */
+        char num[16];
+        snprintf(num, sizeof(num), "%02d", r + 1);
+        gfx_draw_text(px + 12, py + 10, num, C_T2, bg, 1);
+
+        /* Sample name (filename without path/extension), centred. */
+        char name[40];
+        const char *slash = strrchr(row->wav_path, '/');
+        strncpy(name, slash ? slash + 1 : row->wav_path, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+        char *dot = strrchr(name, '.');
+        if (dot) *dot = '\0';
+        draw_text_centred(px, py, pw, ph, name, muted ? C_T3 : C_T0, bg, 2);
+    }
+
+    /* Page strip: [< PREV]  PAGE x/y · N pads  [NEXT >] */
+    if (has_bar) {
+        int bar_y = TABBAR_Y - LIVE_PAGE_BAR_H;
+        gfx_fill_rect(0, bar_y, 1280, LIVE_PAGE_BAR_H, C_BG2);
+        gfx_hline(bar_y, C_LINE);
+        bool can_prev = s_live_pad_page > 0;
+        bool can_next = s_live_pad_page < pages - 1;
+        draw_text_centred(0, bar_y, 1280 / 3, LIVE_PAGE_BAR_H,
+                          "< PREV", can_prev ? C_LIME : C_T3, C_BG2, 2);
+        draw_text_centred(1280 * 2 / 3, bar_y, 1280 / 3, LIVE_PAGE_BAR_H,
+                          "NEXT >", can_next ? C_LIME : C_T3, C_BG2, 2);
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "PAGE %d/%d  \xc2\xb7  %d PADS",
+                 s_live_pad_page + 1, pages, npads);
+        draw_text_centred(1280 / 3, bar_y, 1280 / 3, LIVE_PAGE_BAR_H,
+                          lbl, C_T1, C_BG2, 2);
+        gfx_vline(1280 / 3,     bar_y, LIVE_PAGE_BAR_H, C_LINE);
+        gfx_vline(1280 * 2 / 3, bar_y, LIVE_PAGE_BAR_H, C_LINE);
     }
 }
 
@@ -498,7 +550,7 @@ void draw_live_screen(void)
     }
 
     if (g_song.lanes[li].type == LANE_TYPE_DRUM) {
-        draw_live_pad_grid();
+        draw_live_pad_grid(li);
     } else if (g_song.lanes[li].type == LANE_TYPE_SYNTH) {
         setup_live_piano_keys();
         draw_live_piano();
@@ -611,6 +663,17 @@ void draw_master_screen(void)
         } else {
             gfx_draw_text(sx + mfx_slot_w / 2 - 8, sy + 26, "+", C_T3, C_BG2, 3);
         }
+    }
+
+    /* SEND FX button (opens the send-bus FX chain editor) */
+    {
+        int by = y0 + 52 + 92;
+        gfx_fill_round_rect(col2_x + 24, by, col2_w - 48, 48, 8, C_BG3);
+        gfx_draw_round_rect(col2_x + 24, by, col2_w - 48, 48, 8, C_LINE2);
+        char sbuf[32];
+        snprintf(sbuf, sizeof(sbuf), "SEND FX  \xc2\xb7  %d", g_song.send_fx_count);
+        gfx_draw_text(col2_x + 40, by + 16, sbuf, C_CYAN, C_BG3, 2);
+        gfx_draw_text(col2_x + col2_w - 48 - 24, by + 16, ">", C_T3, C_BG3, 2);
     }
 
     /* Col 3: Clock */
@@ -779,6 +842,15 @@ void draw_drum_grid_screen(void)
     gfx_draw_round_rect(1208, 10, 48, 52, 6, C_LINE2);
     draw_text_centred(1208, 10, 48, 52, "+", C_LIME, C_BG3, 3);
 
+    /* +ROW / EUCL (relocated here from the bottom toolbar for more space) */
+    gfx_fill_round_rect(380, 10, 150, 52, 8, C_BG3);
+    gfx_draw_round_rect(380, 10, 150, 52, 8, C_LINE2);
+    draw_text_centred(380, 10, 150, 52, "+ROW", C_LIME, C_BG3, 2);
+    gfx_fill_round_rect(540, 10, 150, 52, 8, s_eucl_popup ? C_CYAN : C_BG3);
+    gfx_draw_round_rect(540, 10, 150, 52, 8, C_LINE2);
+    draw_text_centred(540, 10, 150, 52, "EUCL", s_eucl_popup ? C_BG : C_CYAN,
+                      s_eucl_popup ? C_CYAN : C_BG3, 2);
+
     int steps = seq ? seq->step_count : 16;
     if (steps < 1) steps = 16;
 
@@ -913,27 +985,10 @@ void draw_drum_grid_screen(void)
     gfx_fill_rect(0, tb_y, 1280, DG_TOOLBAR_H, C_BG2);
     gfx_hline(tb_y, C_LINE2);
 
-    gfx_fill_round_rect( 24, tb_y + 8, 140, 56, 10, C_BG3);
-    gfx_draw_round_rect( 24, tb_y + 8, 140, 56, 10, C_LINE2);
-    gfx_draw_text(48, tb_y + 20, "COPY",  C_T0, C_BG3, 2);
-
-    gfx_fill_round_rect(180, tb_y + 8, 160, 56, 10, C_BG3);
-    gfx_draw_round_rect(180, tb_y + 8, 160, 56, 10, C_LINE2);
-    gfx_draw_text(200, tb_y + 20, "PASTE", C_T0, C_BG3, 2);
-
-    gfx_fill_round_rect(356, tb_y + 8, 152, 56, 10, C_BG3);
-    gfx_draw_round_rect(356, tb_y + 8, 152, 56, 10, C_LINE2);
-    gfx_draw_text(376, tb_y + 20, "CLEAR", C_T0, C_BG3, 2);
-
-    /* ADD ROW button */
-    gfx_fill_round_rect(524, tb_y + 8, 148, 56, 10, C_BG3);
-    gfx_draw_round_rect(524, tb_y + 8, 148, 56, 10, C_LINE2);
-    draw_text_centred(524, tb_y + 8, 148, 56, "+ROW", C_T0, C_BG3, 2);
-
-    /* EUCL button */
-    gfx_fill_round_rect(688, tb_y + 8, 148, 56, 10, C_BG3);
-    gfx_draw_round_rect(688, tb_y + 8, 148, 56, 10, C_LINE2);
-    draw_text_centred(688, tb_y + 8, 148, 56, "EUCL", C_CYAN, C_BG3, 2);
+    /* CLEAR button — wipes every row's step pattern */
+    gfx_fill_round_rect( 24, tb_y + 8, 152, 56, 10, C_BG3);
+    gfx_draw_round_rect( 24, tb_y + 8, 152, 56, 10, C_LINE2);
+    draw_text_centred(24, tb_y + 8, 152, 56, "CLEAR", C_T0, C_BG3, 2);
 
     /* row info text + scroll up/down chevrons */
     int end_row = s_dg_row_offset + rows_vis;
@@ -962,6 +1017,7 @@ void draw_drum_grid_screen(void)
         gfx_hline(ep_y + 44, C_LINE);
 
         /* Hits */
+        if (s_eucl_hits > steps) s_eucl_hits = steps;
         gfx_draw_text(ep_x + 40, ep_y + 60, "HITS", C_T2, C_BG2, 2);
         gfx_fill_round_rect(ep_x + 280, ep_y + 80, 52, 52, 6, C_BG3);
         draw_text_centred(ep_x + 280, ep_y + 80, 52, 52, "-", C_T0, C_BG3, 3);
@@ -971,15 +1027,10 @@ void draw_drum_grid_screen(void)
         gfx_fill_round_rect(ep_x + 400, ep_y + 80, 52, 52, 6, C_BG3);
         draw_text_centred(ep_x + 400, ep_y + 80, 52, 52, "+", C_LIME, C_BG3, 3);
 
-        /* Steps */
-        gfx_draw_text(ep_x + 480, ep_y + 60, "STEPS", C_T2, C_BG2, 2);
-        gfx_fill_round_rect(ep_x + 560, ep_y + 80, 52, 52, 6, C_BG3);
-        draw_text_centred(ep_x + 560, ep_y + 80, 52, 52, "-", C_T0, C_BG3, 3);
-        char steps_buf2[8];
-        snprintf(steps_buf2, sizeof(steps_buf2), "%d", s_eucl_steps);
-        draw_text_centred(ep_x + 620, ep_y + 80, 52, 52, steps_buf2, C_LIME, C_BG2, 3);
-        gfx_fill_round_rect(ep_x + 680, ep_y + 80, 52, 52, 6, C_BG3);
-        draw_text_centred(ep_x + 680, ep_y + 80, 52, 52, "+", C_LIME, C_BG3, 3);
+        /* Total steps (read-only: follows the grid's step count) */
+        char over_buf[24];
+        snprintf(over_buf, sizeof(over_buf), "OVER %d STEPS", steps);
+        gfx_draw_text(ep_x + 500, ep_y + 92, over_buf, C_T2, C_BG2, 2);
 
         /* GEN button */
         gfx_fill_round_rect(ep_x + ep_w - 200, ep_y + ep_h - 60, 160, 44, 8, C_LIME);
@@ -1096,6 +1147,8 @@ void draw_piano_roll_screen(void)
         int ky = body_y + ri * PR_ROW_H;
         bool blk = IS_BLACK[note % 12];
         uint16_t kbg = blk ? C_BG1 : C_BG2;
+        /* row body tinted to match the piano key: white keys grey, black keys dark */
+        gfx_fill_rect(PR_KEY_W, ky, roll_w, PR_ROW_H, blk ? C_BG1 : C_BG2);
         gfx_fill_rect(0, ky, PR_KEY_W, PR_ROW_H, kbg);
         gfx_hline(ky + PR_ROW_H - 1, C_LINE);
         char note_label[8];
@@ -1520,42 +1573,46 @@ void draw_fx_picker_overlay(void);
 
 void draw_fx_adsr_screen(void)
 {
-    lane_t *lane = &g_song.lanes[s_ctx_lane];
+    int        *fx_count;
+    lane_adsr_t *adsr;
+    fx_node_t **chain = fx_target_resolve(s_fx_target, &fx_count, &adsr, NULL);
 
-    char title[32];
-    snprintf(title, sizeof(title), "FX \xc2\xb7 LANE %02d", s_ctx_lane + 1);
-    draw_minibar(title);
+    draw_minibar(fx_target_title(s_fx_target));
 
     int y = MINIBAR_H + 16;
 
-    gfx_fill_round_rect(16, y, 1248, 140, 10, C_BG2);
-    gfx_draw_round_rect(16, y, 1248, 140, 10, C_LINE2);
-    gfx_draw_text(36, y + 12, "LANE ADSR", C_LIME, C_BG2, 1);
+    /* Lane ADSR card — only for lane targets (master/send have no ADSR). */
+    if (adsr) {
+        gfx_fill_round_rect(16, y, 1248, 140, 10, C_BG2);
+        gfx_draw_round_rect(16, y, 1248, 140, 10, C_LINE2);
+        gfx_draw_text(36, y + 12, "LANE ADSR", C_LIME, C_BG2, 1);
 
-    const lane_adsr_t *a = &lane->adsr;
-    static const char *adsr_labels[] = { "A", "D", "S", "R" };
-    float adsr_vals[4] = { a->atk_ms, a->dcy_ms, a->sus * 100.0f, a->rel_ms };
-    const char *adsr_units[4] = { "ms", "ms", "%", "ms" };
-    for (int i = 0; i < 4; i++) {
-        int kx = 420 + i * 200;
-        int ky = y + 30;
-        gfx_fill_circle(kx + 40, ky + 40, 38, C_BG3);
-        gfx_draw_round_rect(kx + 2, ky + 2, 76, 76, 38, C_LINE2);
-        gfx_draw_text(kx + 28, ky + 24, adsr_labels[i], C_T0, C_BG3, 3);
-        char val_buf[16];
-        snprintf(val_buf, sizeof(val_buf), "%.0f%s",
-                 (double)adsr_vals[i], adsr_units[i]);
-        gfx_draw_text(kx + (80 - gfx_text_width(val_buf, 1)) / 2, ky + 84,
-                      val_buf, C_T1, C_BG2, 1);
-        gfx_draw_text(kx + (80 - gfx_text_width(adsr_labels[i], 1)) / 2, ky + 96,
-                      adsr_labels[i], C_T2, C_BG2, 1);
+        const lane_adsr_t *a = adsr;
+        static const char *adsr_labels[] = { "A", "D", "S", "R" };
+        float adsr_vals[4] = { a->atk_ms, a->dcy_ms, a->sus * 100.0f, a->rel_ms };
+        const char *adsr_units[4] = { "ms", "ms", "%", "ms" };
+        for (int i = 0; i < 4; i++) {
+            int kx = 420 + i * 200;
+            int ky = y + 30;
+            bool kdrag = (s_fx_adsr_drag == i);
+            gfx_fill_circle(kx + 40, ky + 40, 38, kdrag ? C_LIME_DIM : C_BG3);
+            gfx_draw_round_rect(kx + 2, ky + 2, 76, 76, 38, kdrag ? C_LIME : C_LINE2);
+            gfx_draw_text(kx + 28, ky + 24, adsr_labels[i], C_T0,
+                          kdrag ? C_LIME_DIM : C_BG3, 3);
+            char val_buf[16];
+            snprintf(val_buf, sizeof(val_buf), "%.0f%s",
+                     (double)adsr_vals[i], adsr_units[i]);
+            gfx_draw_text(kx + (80 - gfx_text_width(val_buf, 1)) / 2, ky + 84,
+                          val_buf, C_T1, C_BG2, 1);
+            gfx_draw_text(kx + (80 - gfx_text_width(adsr_labels[i], 1)) / 2, ky + 96,
+                          adsr_labels[i], C_T2, C_BG2, 1);
+        }
+        y += 156;
     }
-
-    y += 156;
 
     char fx_hdr[32];
     snprintf(fx_hdr, sizeof(fx_hdr), "FX CHAIN \xc2\xb7 %d / %d",
-             lane->fx_count, FX_MAX_PER_LANE);
+             *fx_count, FX_MAX_PER_LANE);
     gfx_draw_text(16, y, fx_hdr, C_T2, C_BG1, 1);
     y += 22;
 
@@ -1564,7 +1621,7 @@ void draw_fx_adsr_screen(void)
     int slot_w       = (slot_total_w - (FX_MAX_PER_LANE - 1) * arrow_w) / FX_MAX_PER_LANE;
     for (int i = 0; i < FX_MAX_PER_LANE; i++) {
         int sx = 16 + i * (slot_w + arrow_w);
-        bool filled   = (i < lane->fx_count && lane->fx[i] != NULL);
+        bool filled   = (i < *fx_count && chain[i] != NULL);
         bool selected = (i == s_fx_sel_slot);
         uint16_t bg  = selected ? C_LIME_DIM : (filled ? C_BG3 : C_BG2);
         uint16_t brd = selected ? C_LIME     : C_LINE2;
@@ -1582,11 +1639,11 @@ void draw_fx_adsr_screen(void)
                 "HARM","FORM","COMB","TILT","PQNT","GFRZ","STUTR",
                 "TSTOP","HAAS","RSON","FVRB","SFLT","SCMP","TGATE","ADLY",
             };
-            int tid = (int)lane->fx[i]->type;
+            int tid = (int)chain[i]->type;
             const char *fname = (tid > 0 && tid < 45) ? FX_SHORT[tid] : "?";
             gfx_draw_text(sx + (slot_w - gfx_text_width(fname, 2)) / 2,
                           y + 26, fname, selected ? C_LIME : C_T0, bg, 2);
-            if (!lane->fx[i]->enabled)
+            if (!chain[i]->enabled)
                 gfx_draw_text(sx + 8, y + 56, "OFF", C_T3, bg, 1);
         } else {
             gfx_draw_text(sx + slot_w / 2 - 8, y + 26, "+", C_T3, bg, 3);
@@ -1596,8 +1653,8 @@ void draw_fx_adsr_screen(void)
     }
 
     y += 96;
-    if (s_fx_sel_slot < lane->fx_count && lane->fx[s_fx_sel_slot]) {
-        fx_node_t *node = lane->fx[s_fx_sel_slot];
+    if (s_fx_sel_slot < *fx_count && chain[s_fx_sel_slot]) {
+        fx_node_t *node = chain[s_fx_sel_slot];
         int panel_h = 720 - y - 16;
         gfx_fill_round_rect(16, y, 1248, panel_h, 10, C_BG2);
         gfx_draw_round_rect(16, y, 1248, panel_h, 10, C_LINE2);
@@ -1607,19 +1664,31 @@ void draw_fx_adsr_screen(void)
         snprintf(fx_title, sizeof(fx_title), "%s \xc2\xb7 SLOT %d",
                  fname, s_fx_sel_slot + 1);
         gfx_draw_text(36, y + 12, fx_title, C_T0, C_BG2, 2);
+        /* CHANGE button — re-open the picker to swap this slot's effect type */
+        gfx_fill_round_rect(852, y + 8, 156, 44, 8, C_BG3);
+        gfx_draw_round_rect(852, y + 8, 156, 44, 8, C_CYAN);
+        gfx_draw_text(852 + (156 - gfx_text_width("CHANGE", 2)) / 2, y + 22,
+                      "CHANGE", C_CYAN, C_BG3, 2);
+        /* DELETE button — large, solid red so it is easy to find and hit */
+        gfx_fill_round_rect(1016, y + 8, 140, 44, 8, C_RED);
+        gfx_draw_round_rect(1016, y + 8, 140, 44, 8, C_RED);
+        gfx_draw_text(1016 + (140 - gfx_text_width("DELETE", 2)) / 2, y + 22,
+                      "DELETE", C_BG, C_RED, 2);
+        /* Enable/disable button */
         bool en = node->enabled;
-        gfx_fill_round_rect(1170, y + 12, 76, 36, 6, en ? C_LIME_DIM : C_BG3);
-        gfx_draw_round_rect(1170, y + 12, 76, 36, 6, en ? C_LIME : C_LINE2);
-        gfx_draw_text(1186, y + 18, en ? "ON" : "OFF",
-                      en ? C_LIME : C_T2, en ? C_LIME_DIM : C_BG3, 2);
+        gfx_fill_round_rect(1168, y + 8, 80, 44, 8, en ? C_LIME_DIM : C_BG3);
+        gfx_draw_round_rect(1168, y + 8, 80, 44, 8, en ? C_LIME : C_LINE2);
+        gfx_draw_text(1168 + (80 - gfx_text_width(en ? "ON" : "OFF", 2)) / 2, y + 22,
+                      en ? "ON" : "OFF", en ? C_LIME : C_T2,
+                      en ? C_LIME_DIM : C_BG3, 2);
 
         /* Param sliders: up to 8 horizontal rows. */
-        int row_h    = 44;
+        int row_h    = 52;
         int rows_top = y + 60;
         int n_params = fx_param_count(tid);
         for (int pi = 0; pi < n_params && pi < 8; pi++) {
             int ry = rows_top + pi * row_h;
-            if (ry + 34 > y + panel_h - 8) break;
+            if (ry + 48 > y + panel_h - 8) break;
             const char *lbl;
             float pmin, pmax;
             int decimals;
@@ -1630,14 +1699,14 @@ void draw_fx_adsr_screen(void)
             if (t > 1.0f) t = 1.0f;
             /* Label */
             gfx_draw_text(36, ry + 6, lbl, C_T2, C_BG2, 1);
-            /* Track */
-            int track_x = 240, track_w = 880, track_y = ry + 14, track_h = 12;
-            gfx_fill_round_rect(track_x, track_y, track_w, track_h, 6, C_BG3);
+            /* Track — taller so it is easier to press */
+            int track_x = 240, track_w = 880, track_y = ry + 16, track_h = 24;
+            gfx_fill_round_rect(track_x, track_y, track_w, track_h, 12, C_BG3);
             int fill_w = (int)(t * (float)track_w);
-            if (fill_w > 4) gfx_fill_round_rect(track_x, track_y, fill_w, track_h, 6, C_LIME);
+            if (fill_w > 4) gfx_fill_round_rect(track_x, track_y, fill_w, track_h, 12, C_LIME);
             /* Thumb */
-            int thumb_x = track_x + (int)(t * (float)track_w) - 8;
-            gfx_fill_round_rect(thumb_x, track_y - 8, 16, track_h + 16, 4, C_T0);
+            int thumb_x = track_x + (int)(t * (float)track_w) - 12;
+            gfx_fill_round_rect(thumb_x, track_y - 8, 24, track_h + 16, 6, C_T0);
             /* Value */
             char val_buf[24];
             if (decimals <= 0) snprintf(val_buf, sizeof(val_buf), "%.0f", (double)pv);
@@ -1662,7 +1731,9 @@ void draw_fx_picker_overlay(void)
     int mx = 80, my = 40, mw = 1120, mh = 640;
     gfx_fill_round_rect(mx, my, mw, mh, 12, C_BG2);
     gfx_draw_round_rect(mx, my, mw, mh, 12, C_LINE2);
-    gfx_draw_text(mx + 24, my + 16, "CHOOSE EFFECT", C_T0, C_BG2, 2);
+    gfx_draw_text(mx + 24, my + 16,
+                  s_fx_picker_replace ? "CHANGE EFFECT" : "CHOOSE EFFECT",
+                  C_T0, C_BG2, 2);
     /* Close X */
     gfx_fill_round_rect(mx + mw - 60, my + 14, 44, 36, 6, C_BG3);
     gfx_draw_round_rect(mx + mw - 60, my + 14, 44, 36, 6, C_LINE2);

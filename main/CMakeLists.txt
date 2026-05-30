@@ -17,7 +17,7 @@ idf_component_register(SRCS "mdns_init.c" "sdcard.c" "sounds_http.c" "synth-32.c
                              "gfx.c" "audio.c" "wifi_http.c" "ui.c" "ui_draw.c" "ui_screens.c"
                              "ws_server.c" "ws_cmd.c" "ws_audio.c"
                              "clock.c" "lane.c"
-                             "drum_seq.c" "piano_roll.c"
+                             "drum_seq.c" "drum_synth.c" "piano_roll.c"
                              "synth_voice.c" "synth_osc.c" "synth_phys.c" "synth_extra.c"
                              "arp.c" "lfo.c" "fx.c"
                              "settings.c" "song.c" "render_export.c"

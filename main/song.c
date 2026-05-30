@@ -676,6 +676,15 @@ static int load_lane(const rd_t *rd, int i, song_t *song)
                                        lane->synth_params[sid]);
         }
     }
+    /* Drum-synth lanes: pattern persistence is a follow-up; rebuild the
+     * default 808 kit so a reloaded lane is still playable. */
+    if (lane->type == LANE_TYPE_DRUMSYNTH && !lane->dsyn) {
+        lane->dsyn = dsyn_alloc();
+        if (lane->dsyn) {
+            dsyn_update_timing(lane->dsyn, lane->loop_len_ticks);
+            dsyn_reset(lane->dsyn, lane->lane_tick);
+        }
+    }
     /* Open WAV file for WAV lanes that have a path */
     if (lane->type == LANE_TYPE_WAV && lane->wav_path[0]) {
         if (lane->wav_lane_slot < 0) {
@@ -745,8 +754,12 @@ bool song_load(const char *path)
 
     rd_t rd = { .js = buf, .t = tokens, .n = r };
 
-    /* Reset song state (frees existing lane allocations) */
+    /* Reset song state. lane_init_all() deactivates+clears every lane first, so
+     * the audio task stops touching the old rings; then wav_pool_reset() frees
+     * their preload buffers and rewinds the slot allocator so this load reuses
+     * the pool instead of leaking it. */
     lane_init_all(&g_song);
+    wav_pool_reset();
 
     /* Parse top-level object */
     int ch = tokens[0].size;

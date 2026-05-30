@@ -85,6 +85,25 @@ void lane_adsr_init(lane_adsr_t *a, float atk_ms, float dcy_ms,
     a->level = a->sus_level;
 }
 
+void lane_adsr_set_params(lane_adsr_t *a, float atk_ms, float dcy_ms,
+                          float sus, float rel_ms)
+{
+    /* Update params + derived rates without disturbing the current stage or
+     * output level, so live edits take effect without a click. */
+    a->atk_ms    = atk_ms;
+    a->dcy_ms    = dcy_ms;
+    a->sus       = sus < 0.0f ? 0.0f : (sus > 1.0f ? 1.0f : sus);
+    a->rel_ms    = rel_ms;
+    a->sus_level = a->sus;
+    float sr     = (float)SAMPLE_RATE;
+    a->atk_rate  = (atk_ms > 0.0f) ? 1000.0f / (atk_ms * sr) : 1.0f;
+    a->dcy_rate  = (dcy_ms > 0.0f)
+                   ? (1.0f - a->sus_level) * 1000.0f / (dcy_ms * sr) : 1.0f;
+    a->rel_rate  = (rel_ms > 0.0f) ? 1000.0f / (rel_ms * sr) : 1.0f;
+    /* If sitting in SUSTAIN, follow the new sustain level immediately. */
+    if (a->stage == LADSR_SUSTAIN) a->level = a->sus_level;
+}
+
 void lane_adsr_gate_on(lane_adsr_t *a)
 {
     a->stage = LADSR_ATTACK;

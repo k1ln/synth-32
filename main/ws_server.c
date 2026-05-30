@@ -72,6 +72,10 @@ static void ws_send_to(int fd, const uint8_t *data, size_t len)
 
 static void ws_broadcast(const uint8_t *data, size_t len)
 {
+    /* The touch UI/audio tasks can call this before ws_server_register() has
+     * created the mutex (e.g. a screen tap during boot, before the network is
+     * up). No server means no browser clients, so just drop the notification. */
+    if (!s_clients_mx) return;
     xSemaphoreTake(s_clients_mx, portMAX_DELAY);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (s_clients[i].active) {
@@ -87,6 +91,7 @@ static void ws_broadcast(const uint8_t *data, size_t len)
 /* Like ws_broadcast but skips one fd (the command sender). */
 static void ws_broadcast_except(const uint8_t *data, size_t len, int skip_fd)
 {
+    if (!s_clients_mx) return;
     xSemaphoreTake(s_clients_mx, portMAX_DELAY);
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         if (s_clients[i].active && s_clients[i].fd != skip_fd) {
@@ -245,6 +250,25 @@ static size_t ser_master_fx_chain(uint8_t *buf)
     return off;
 }
 
+/* WS_MSG_FX_UPDATE for send bus (lane_idx = 0xFE) */
+static size_t ser_send_fx_chain(uint8_t *buf)
+{
+    buf[0] = WS_MSG_FX_UPDATE;
+    buf[1] = 0xFE;  /* sentinel: send bus */
+    buf[2] = (uint8_t)g_song.send_fx_count;
+    size_t off = 3;
+    for (int s = 0; s < g_song.send_fx_count && s < FX_MAX_PER_LANE; s++) {
+        const fx_node_t *n = g_song.send_fx[s];
+        if (!n) { memset(buf + off, 0, FX_SER_SLOT_BYTES); off += FX_SER_SLOT_BYTES; continue; }
+        buf[off + 0] = (uint8_t)s;
+        buf[off + 1] = (uint8_t)n->type;
+        buf[off + 2] = n->enabled ? 1 : 0;
+        memcpy(buf + off + 3, n->params, 32);
+        off += FX_SER_SLOT_BYTES;
+    }
+    return off;
+}
+
 /* WS_MSG_METER  [1 + 8 bytes]
  *   peak_l f32, peak_r f32
  */
@@ -334,6 +358,12 @@ static void send_full_state(int fd)
         if (n) ws_send_to(fd, buf, n);
     }
 
+    /* Send-bus FX chain */
+    if (g_song.send_fx_count > 0) {
+        n = ser_send_fx_chain(buf);
+        if (n) ws_send_to(fd, buf, n);
+    }
+
     /* Send a FULL_STATE marker so the client knows we're done */
     buf[0] = WS_MSG_FULL_STATE;
     ws_send_to(fd, buf, 1);
@@ -343,6 +373,7 @@ static void send_full_state(int fd)
 
 bool ws_send_to_fd(int fd, const uint8_t *data, size_t len)
 {
+    if (!s_clients_mx) return false;
     xSemaphoreTake(s_clients_mx, portMAX_DELAY);
     bool found = false;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
@@ -380,6 +411,7 @@ void ws_notify_change(ws_msg_type_t type, int idx)
         break;
     case WS_MSG_FX_UPDATE:
         if (idx == 0xFF) n = ser_master_fx_chain(buf);
+        else if (idx == 0xFE) n = ser_send_fx_chain(buf);
         else if (idx >= 0 && idx < NUM_LANES) n = ser_fx_chain(buf, idx);
         break;
     case WS_MSG_METER:    n = ser_meter(buf);    break;
@@ -432,6 +464,7 @@ void ws_notify_except(ws_msg_type_t type, int idx, int skip_fd)
         break;
     case WS_MSG_FX_UPDATE:
         if (idx == 0xFF) n = ser_master_fx_chain(buf);
+        else if (idx == 0xFE) n = ser_send_fx_chain(buf);
         else if (idx >= 0 && idx < NUM_LANES) n = ser_fx_chain(buf, idx);
         break;
     case WS_MSG_MASTER_UPDATE: {

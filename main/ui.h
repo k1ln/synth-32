@@ -57,6 +57,19 @@ extern "C" {
 #define LIVE_LANE_TAB_H  52
 #define LIVE_PAD_GAP     12
 #define LIVE_PAD_PAD     16
+#define LIVE_PAD_COLS     4
+#define LIVE_PAD_ROWS     2
+#define LIVE_PAD_PER_PAGE (LIVE_PAD_COLS * LIVE_PAD_ROWS)   /* 8 pads / page */
+#define LIVE_PAGE_BAR_H  56    /* prev/next page strip when > 1 page of pads */
+
+/* LIVE drum pad layout helpers (shared by draw + touch; defined in ui.c).
+ * live_drum_collect: fills rows_out with the absolute drum_seq row indices
+ * that have an assigned sample, returns the count (the LIVE pads).
+ * live_drum_pad_rect: pixel rect of visible pad `slot` (0..LIVE_PAD_PER_PAGE-1);
+ * `has_bar` shrinks the grid to leave room for the page strip. */
+struct drum_seq_s;
+int  live_drum_collect(const struct drum_seq_s *seq, int *rows_out, int max);
+void live_drum_pad_rect(bool has_bar, int slot, int *px, int *py, int *pw, int *ph);
 
 /* Back zone in mini bar */
 #define MINIBAR_BACK_W   88

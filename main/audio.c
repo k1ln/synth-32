@@ -25,6 +25,7 @@
 #include "arp.h"
 #include "lfo.h"
 #include "fx.h"
+#include "synth_voice.h"   /* sv_soft_clip — master-bus soft limiter */
 #include "ws_audio.h"
 #include "settings.h"
 #include "render_export.h"
@@ -225,8 +226,9 @@ void stem_export_start(const char *dir)
     for (int li = 0; li < NUM_LANES; li++) {
         if (!g_song.lanes[li].active) continue;
         char path[160];
-        const char *lname = g_song.lanes[li].type == LANE_TYPE_DRUM  ? "drum"  :
-                            g_song.lanes[li].type == LANE_TYPE_SYNTH ? "synth" : "wav";
+        const char *lname = g_song.lanes[li].type == LANE_TYPE_DRUM      ? "drum"  :
+                            g_song.lanes[li].type == LANE_TYPE_DRUMSYNTH ? "dsyn"  :
+                            g_song.lanes[li].type == LANE_TYPE_SYNTH     ? "synth" : "wav";
         snprintf(path, sizeof(path), "%s/lane%02d_%s.wav", dir, li, lname);
         FILE *fp = fopen(path, "wb");
         if (!fp) continue;
@@ -450,6 +452,12 @@ static void audio_task(void *arg)
                                   s_lane_l, s_lane_r, AUDIO_BUF_FRAMES);
                 }
 
+                /* ── b2. Drum-synth lane: step trigger + analog voice render ── */
+                else if (lane->type == LANE_TYPE_DRUMSYNTH && lane->dsyn) {
+                    dsyn_tick(lane->dsyn, lane->lane_tick, tick_delta,
+                              s_lane_l, s_lane_r, AUDIO_BUF_FRAMES);
+                }
+
                 /* ── c. Synth lane: LFO → arp/piano-roll → render ───────────── */
                 else if (lane->type == LANE_TYPE_SYNTH) {
                     /* LFO block tick: updates lane->lfo.mod_out[] */
@@ -631,15 +639,12 @@ static void audio_task(void *arg)
 
         /* ── 4. Master FX + vol/pan + clip → int16 → I2S ──────────────── */
         {
-            /* Clip master bus to int16 L/R scratch */
+            /* Soft-limit master bus into int16 L/R scratch — gentle tanh knee
+             * on peaks (e.g. several lanes / a big chord summing hot) instead
+             * of a harsh hard clip. */
             for (int f = 0; f < AUDIO_BUF_FRAMES; f++) {
-                int32_t lv = s_master_l[f], rv = s_master_r[f];
-                if (lv >  32767) lv =  32767;
-                if (lv < -32768) lv = -32768;
-                if (rv >  32767) rv =  32767;
-                if (rv < -32768) rv = -32768;
-                s_fx_l[f] = (int16_t)lv;
-                s_fx_r[f] = (int16_t)rv;
+                s_fx_l[f] = (int16_t)sv_soft_clip(s_master_l[f]);
+                s_fx_r[f] = (int16_t)sv_soft_clip(s_master_r[f]);
             }
             /* Apply master FX chain in-place on L/R scratch */
             if (g_song.master_fx_count > 0)

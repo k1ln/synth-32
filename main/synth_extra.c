@@ -724,8 +724,10 @@ synth_inst_t *synth_bitcrush_new(void)
     return &s->hdr;
 }
 
-/* ── Dispatcher ──────────────────────────────────────────────────────────── */
-synth_inst_t *synth_new(uint8_t type_id)
+/* ── Raw factory ─────────────────────────────────────────────────────────── */
+/* Builds the bare (single-voice for most types) instrument by type_id.  Used
+ * directly by the polyphony wrapper for each of its inner voices. */
+static synth_inst_t *synth_new_raw(uint8_t type_id)
 {
     switch (type_id) {
     case SYNTH_TYPE_MONO_WT:     return synth_mono_wt_new();
@@ -750,6 +752,144 @@ synth_inst_t *synth_new(uint8_t type_id)
     case SYNTH_TYPE_BITCRUSH:    return synth_bitcrush_new();
     default:                     return NULL;
     }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Polyphony wrapper — turns an inherently-monophonic synth into a per-key voice
+ * pool so any instrument layers when several keys are held.  It holds PW_VOICES
+ * independent instances of the wrapped type, routes each note-on to a free (or
+ * stolen) voice, note-off to the matching voice, and sums their renders with
+ * the same fixed-headroom + soft-clip scheme as the poly wavetable engine — so
+ * chords swell instead of ducking, and peaks saturate gently.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+#define PW_VOICES    6   /* simultaneous notes per live synth lane            */
+#define PW_HEADROOM  3   /* voices that reach 0 dBFS together (see synth_osc)  */
+
+typedef struct {
+    synth_inst_t  hdr;
+    synth_inst_t *v[PW_VOICES];
+    uint8_t       note[PW_VOICES];   /* note each voice last played            */
+    bool          gated[PW_VOICES];  /* key still held (not yet released)      */
+    uint32_t      age[PW_VOICES];    /* allocation order — lowest = oldest     */
+    uint32_t      age_ctr;
+} pw_t;
+
+static void pw_note_on(synth_inst_t *self, uint8_t note, uint8_t vel)
+{
+    pw_t *s = (pw_t *)self;
+    int pick = -1;
+    /* 1. same note already gated → retrigger that voice */
+    for (int i = 0; i < PW_VOICES; i++)
+        if (s->gated[i] && s->note[i] == note) { pick = i; break; }
+    /* 2. oldest released/idle voice */
+    if (pick < 0) {
+        uint32_t best = UINT32_MAX;
+        for (int i = 0; i < PW_VOICES; i++)
+            if (!s->gated[i] && s->age[i] < best) { best = s->age[i]; pick = i; }
+    }
+    /* 3. all gated → steal the oldest */
+    if (pick < 0) {
+        uint32_t best = UINT32_MAX;
+        for (int i = 0; i < PW_VOICES; i++)
+            if (s->age[i] < best) { best = s->age[i]; pick = i; }
+    }
+    s->note[pick]  = note;
+    s->gated[pick] = true;
+    s->age[pick]   = ++s->age_ctr;
+    if (s->v[pick] && s->v[pick]->note_on) s->v[pick]->note_on(s->v[pick], note, vel);
+}
+
+static void pw_note_off(synth_inst_t *self, uint8_t note)
+{
+    pw_t *s = (pw_t *)self;
+    for (int i = 0; i < PW_VOICES; i++)
+        if (s->gated[i] && s->note[i] == note) {
+            s->gated[i] = false;   /* keep age → preferred for next steal */
+            if (s->v[i] && s->v[i]->note_off) s->v[i]->note_off(s->v[i], note);
+        }
+}
+
+static void pw_render(synth_inst_t *self, int16_t *out_l, int16_t *out_r, int n)
+{
+    pw_t *s = (pw_t *)self;
+    /* Audio task is single-threaded → static scratch/accumulators are safe. */
+    static int16_t sl[AUDIO_BUF_FRAMES], sr[AUDIO_BUF_FRAMES];
+    static int32_t al[AUDIO_BUF_FRAMES], ar[AUDIO_BUF_FRAMES];
+    for (int i = 0; i < n; i++) { al[i] = 0; ar[i] = 0; }
+    for (int vx = 0; vx < PW_VOICES; vx++) {
+        synth_inst_t *iv = s->v[vx];
+        if (!iv || !iv->render) continue;
+        /* Inner renders overwrite, and early-return (leaving the buffer) when
+         * idle — so clear scratch first; idle voices then add silence. */
+        for (int i = 0; i < n; i++) { sl[i] = 0; sr[i] = 0; }
+        iv->render(iv, sl, sr, n);
+        for (int i = 0; i < n; i++) { al[i] += sl[i]; ar[i] += sr[i]; }
+    }
+    for (int i = 0; i < n; i++) {
+        out_l[i] = (int16_t)sv_soft_clip(al[i] / PW_HEADROOM);
+        out_r[i] = (int16_t)sv_soft_clip(ar[i] / PW_HEADROOM);
+    }
+}
+
+static void pw_set_param(synth_inst_t *self, uint8_t id, float v)
+{
+    pw_t *s = (pw_t *)self;
+    for (int i = 0; i < PW_VOICES; i++)
+        if (s->v[i] && s->v[i]->set_param) s->v[i]->set_param(s->v[i], id, v);
+}
+
+static void pw_free(synth_inst_t *self)
+{
+    pw_t *s = (pw_t *)self;
+    for (int i = 0; i < PW_VOICES; i++)
+        if (s->v[i] && s->v[i]->free) s->v[i]->free(s->v[i]);
+    heap_caps_free(s);
+}
+
+/* Types that already manage their own polyphony / are one-shot percussion and
+ * should not be wrapped. */
+static bool type_wraps_poly(uint8_t t)
+{
+    switch (t) {
+    case SYNTH_TYPE_POLY_WT:   /* already an 8-voice pool                */
+    case SYNTH_TYPE_DRUM_BD:   /* percussive one-shots, sequencer-driven */
+    case SYNTH_TYPE_DRUM_SD:
+    case SYNTH_TYPE_DRUM_HH:
+        return false;
+    default:
+        return true;
+    }
+}
+
+static synth_inst_t *synth_poly_wrap_new(uint8_t inner_type)
+{
+    pw_t *s = SYNTH_ALLOC(pw_t);
+    if (!s) return NULL;
+    for (int i = 0; i < PW_VOICES; i++) {
+        s->v[i] = synth_new_raw(inner_type);
+        if (!s->v[i]) {                        /* alloc failed → unwind */
+            for (int j = 0; j < i; j++)
+                if (s->v[j] && s->v[j]->free) s->v[j]->free(s->v[j]);
+            heap_caps_free(s);
+            return NULL;
+        }
+    }
+    s->hdr.type_id     = inner_type;   /* report wrapped type for save/load/UI */
+    s->hdr.voice_count = PW_VOICES;
+    s->hdr.render      = pw_render;
+    s->hdr.note_on     = pw_note_on;
+    s->hdr.note_off    = pw_note_off;
+    s->hdr.set_param   = pw_set_param;
+    s->hdr.free        = pw_free;
+    return &s->hdr;
+}
+
+/* ── Dispatcher ──────────────────────────────────────────────────────────── */
+synth_inst_t *synth_new(uint8_t type_id)
+{
+    if (type_id >= SYNTH_TYPE_COUNT) return NULL;
+    if (type_wraps_poly(type_id)) return synth_poly_wrap_new(type_id);
+    return synth_new_raw(type_id);
 }
 
 void synth_free(synth_inst_t *inst)

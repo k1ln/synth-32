@@ -123,6 +123,17 @@ synth_inst_t *synth_mono_wt_new(void)
 
 #define POLY_VOICES 8
 
+/* Fixed mix headroom for the poly engine.  Voices are summed at a *constant*
+ * per-voice level instead of being divided by the live note count, so holding a
+ * chord swells naturally instead of ducking every note (and releasing a key no
+ * longer makes the survivors jump up in level).  POLY_HEADROOM ≈ how many
+ * simultaneous voices reach 0 dBFS together: a 3-note chord lands near full
+ * scale, single notes sit ~9 dB below it, and the master-bus soft clipper in
+ * audio.c catches the rare moment when many voices align in phase.  Tune by ear:
+ * lower = louder single notes / more limiting on big chords, higher = the
+ * reverse. */
+#define POLY_HEADROOM 3
+
 typedef struct {
     synth_inst_t hdr;
     sv_voice_t   voices[POLY_VOICES];
@@ -165,7 +176,8 @@ static void poly_wt_render(synth_inst_t *self, int16_t *out_l, int16_t *out_r, i
         for (int v = 0; v < POLY_VOICES; v++)
             if (s->voices[v].active)
                 mix += sv_voice_render(&s->voices[v], wt, s->wave);
-        mix /= active;
+        mix /= POLY_HEADROOM;        /* fixed headroom — no per-note ducking  */
+        mix = sv_soft_clip(mix);     /* tame in-phase chord peaks gently       */
         out_l[i] = (int16_t)(mix);
         out_r[i] = (int16_t)(mix);
     }

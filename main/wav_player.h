@@ -87,6 +87,14 @@ typedef struct {
  * and starts the sd_stream_task on core 0. */
 void wav_engine_init(void);
 
+/* Wire up the lane pointer table only (no task, no SD). Idempotent. Must run
+ * before any wav_lane_alloc_slot()/wav_lane_open() — e.g. the boot song_load. */
+void wav_pool_init(void);
+
+/* Free all preload buffers and rewind the slot allocator. Called by song_load
+ * so reloading a song doesn't leak/exhaust the lane pool. */
+void wav_pool_reset(void);
+
 /* Claim the next free lane slot; returns -1 if the pool is exhausted. */
 int wav_lane_alloc_slot(void);
 

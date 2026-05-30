@@ -144,6 +144,12 @@ bool drum_seq_alloc_rings(drum_seq_t *seq, wav_lane_t *pool,
  * Call whenever either changes. */
 void drum_seq_update_timing(drum_seq_t *seq, uint32_t loop_len_ticks);
 
+/* Change the global step count to new_sc and proportionally rescale every row's
+ * pattern so existing hits keep their position in musical time ("stretch": a hit
+ * on step 4-of-16 becomes step 8-of-32). Per-row step counts are scaled by the
+ * same ratio, so polyrhythm rows stay independent. Recomputes timing. */
+void drum_seq_set_step_count(drum_seq_t *seq, uint8_t new_sc, uint32_t loop_len_ticks);
+
 /* Reset current_step to 0 and last_step_tick to lane_tick_now.
  * Called from lane restart (LIVE/SONG mode). */
 void drum_seq_reset(drum_seq_t *seq, uint32_t lane_tick_now);
@@ -160,6 +166,14 @@ bool drum_seq_remove_row(drum_seq_t *seq, int ri);
  * n_frames  : AUDIO_BUF_FRAMES */
 void drum_seq_tick(drum_seq_t *seq, uint32_t lane_tick, uint32_t tick_delta,
                    int32_t *out_l, int32_t *out_r, int n_frames);
+
+/* Immediate one-shot trigger of a single row, for LIVE finger-drumming.
+ * Fires the row's primary sample right now (independent of the sequencer
+ * clock — works while transport is stopped) at the given velocity. The hit
+ * is drained through the row's volume/pan and the owning lane's FX chain by
+ * the next drum_seq_tick, so it sounds exactly like the song row. Ignores
+ * muted rows and does not fire the multi-hit chain. */
+void drum_seq_trigger_row(drum_seq_t *seq, int ri, uint8_t velocity);
 
 #ifdef __cplusplus
 }

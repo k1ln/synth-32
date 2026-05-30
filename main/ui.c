@@ -36,6 +36,7 @@
 #include "ui.h"
 #include "ui_state.h"
 #include "ws_server.h"
+#include "ws_cmd.h"
 #include "render_export.h"
 
 static const char *TAG = "ui";
@@ -109,6 +110,32 @@ bool is_main_screen(screen_id_t scr)
 
 int   s_live_lane    = 0;
 int   s_live_octave  = 4;
+int   s_live_pad_page = 0;
+
+/* ── LIVE drum pad layout (shared by draw_live_pad_grid + handle_live_tap) ── */
+int live_drum_collect(const struct drum_seq_s *seq, int *rows_out, int max)
+{
+    if (!seq) return 0;
+    int n = 0;
+    for (int r = 0; r < seq->row_count && n < max; r++)
+        if (seq->rows[r].wav_path[0]) rows_out[n++] = r;
+    return n;
+}
+
+void live_drum_pad_rect(bool has_bar, int slot, int *px, int *py, int *pw, int *ph)
+{
+    int pad_y      = CONTENT_Y + LIVE_LANE_TAB_H + LIVE_PAD_PAD;
+    int bottom     = TABBAR_Y - LIVE_PAD_PAD - (has_bar ? LIVE_PAGE_BAR_H : 0);
+    int pad_area_h = bottom - pad_y;
+    int pad_w      = (1280 - LIVE_PAD_PAD * (LIVE_PAD_COLS + 1)) / LIVE_PAD_COLS;
+    int pad_h      = (pad_area_h - LIVE_PAD_GAP * (LIVE_PAD_ROWS - 1)) / LIVE_PAD_ROWS;
+    int col        = slot % LIVE_PAD_COLS;
+    int row        = slot / LIVE_PAD_COLS;
+    *px = LIVE_PAD_PAD + col * (pad_w + LIVE_PAD_GAP);
+    *py = pad_y       + row * (pad_h + LIVE_PAD_GAP);
+    *pw = pad_w;
+    *ph = pad_h;
+}
 
 /* Polyphonic gain normalisation: count of currently-held live keys.
  * Read by audio task (core 1) — volatile, no mutex needed (single writer). */
@@ -130,16 +157,64 @@ piano_key_t   s_piano_keys[MAX_KEYS]          = {};
 int     s_key_cnt                 = 0;
 bool    s_key_held[MAX_KEYS]      = {};
 uint8_t s_key_off_cnt[MAX_KEYS]   = {};
+/* Per-framebuffer record of the key pressed-state each buffer currently shows.
+ * Because the panel is double-buffered, live-key feedback updates the back
+ * buffer (tear-free) and presents it by swap; both buffers converge over two
+ * frames. Indexed by gfx_back_index(). */
+bool    s_key_shown[2][MAX_KEYS]  = {};
+/* Set per buffer when the chrome (lane tabs, octave bar, …) needs a full repaint
+ * — e.g. on entering the live piano or an octave/lane change. A dirty buffer
+ * gets a full draw_screen() when it next becomes the back buffer. */
+bool    s_live_chrome_dirty[2]    = {};
 
 int s_song_browser_sel = 0;
 int s_drag_fader       = -1;
 int s_dg_long_row      = -1, s_dg_long_step = -1, s_dg_hold_ms = 0;
 int s_dg_row_offset    = 0;
 int s_fx_sel_slot      = 0;
+int  s_fx_target            = 0;   /* lane idx / FX_TGT_MASTER / FX_TGT_SEND */
 bool s_fx_picker_open       = false;
 int  s_fx_picker_target_slot = 0;
+bool s_fx_picker_replace    = false;
 int  s_fx_picker_scroll     = 0;
 int  s_fx_param_drag        = -1;
+int  s_fx_adsr_drag         = -1;
+float s_fx_adsr_drag_start  = 0.0f;
+int  s_fx_adsr_drag_y       = 0;
+
+/* Resolve an FX target (lane / master / send) to its chain. */
+fx_node_t **fx_target_resolve(int target, int **out_count,
+                              lane_adsr_t **out_adsr, int *out_notify)
+{
+    if (target == FX_TGT_MASTER) {
+        *out_count = &g_song.master_fx_count;
+        if (out_adsr)   *out_adsr   = NULL;
+        if (out_notify) *out_notify = 0xFF;
+        return g_song.master_fx;
+    }
+    if (target == FX_TGT_SEND) {
+        *out_count = &g_song.send_fx_count;
+        if (out_adsr)   *out_adsr   = NULL;
+        if (out_notify) *out_notify = 0xFE;
+        return g_song.send_fx;
+    }
+    if (target < 0 || target >= NUM_LANES) target = 0;
+    lane_t *l = &g_song.lanes[target];
+    *out_count = &l->fx_count;
+    if (out_adsr)   *out_adsr   = &l->adsr;
+    if (out_notify) *out_notify = target;
+    return l->fx;
+}
+
+const char *fx_target_title(int target)
+{
+    static char buf[32];
+    if (target == FX_TGT_MASTER)    snprintf(buf, sizeof(buf), "MASTER FX");
+    else if (target == FX_TGT_SEND) snprintf(buf, sizeof(buf), "SEND FX");
+    else snprintf(buf, sizeof(buf), "FX \xc2\xb7 LANE %02d", target + 1);
+    return buf;
+}
+
 int s_sb_kit_sel       = 0, s_sb_file_sel = 0;
 
 /* ── Real sound browser state ────────────────────────────────────────────── */
@@ -318,6 +393,10 @@ int64_t s_fader_last_tap_ms   = 0;
 #define LANE_VOL_H  88   /* height of the expanded vol/bars panel */
 int s_vol_open_lane = -1;
 static bool s_vol_fader_drag = false;   /* dragging the big fader */
+/* Anchor for row-step scroll handlers (SONG view, FX picker). Unlike s_drag_y
+ * — which is reset every move frame for per-frame-delta handlers — this is only
+ * re-anchored when a scroll step actually fires, so drag distance accumulates. */
+static int  s_scroll_anchor_y = 0;
 
 int      s_pr_view_semitone  = 64;
 int      s_pr_drag_note      = -1;
@@ -337,6 +416,11 @@ static int    s_pr_aud_cnt = 0;
  * ══════════════════════════════════════════════════════════════════════════ */
 
 static inline int clamp_i(int v, int lo, int hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+static inline float clampf(float v, float lo, float hi)
 {
     return v < lo ? lo : v > hi ? hi : v;
 }
@@ -395,6 +479,7 @@ static bool handle_tabbar_tap(int x, int y)
         s_nav_top      = 0;
         s_nav_stack[0] = SCREEN_SONG;
         s_fx_sel_slot  = 0;
+        s_fx_target    = s_ctx_lane;
         push_screen(SCREEN_FX_ADSR);
         break;
     case 5: /* LIVE */
@@ -521,6 +606,7 @@ static bool handle_song_view_tap(int x, int y)
             if (pt_in(x, y, rx_fx, ry, LANE_FX_W, LANE_ROW_H)) {
                 s_ctx_lane    = i;
                 s_fx_sel_slot = 0;
+                s_fx_target   = i;
                 push_screen(SCREEN_FX_ADSR);
                 return true;
             }
@@ -669,7 +755,7 @@ static bool handle_live_tap(int x, int y)
             char label[16];
             snprintf(label, sizeof(label), "%02d", i + 1);
             int tw = gfx_text_width(label, 2) + 48;
-            if (x >= tx && x < tx + tw) { s_live_lane = cnt; return true; }
+            if (x >= tx && x < tx + tw) { s_live_lane = cnt; s_live_pad_page = 0; return true; }
             tx += tw; cnt++;
         }
     }
@@ -681,27 +767,47 @@ static bool handle_live_tap(int x, int y)
     }
     if (li < 0) return false;
 
-    /* Drum pad grid */
+    /* Drum pad grid — one pad per assigned sample in the lane's song row,
+     * paged when there are more than fit on screen. */
     if (g_song.lanes[li].type == LANE_TYPE_DRUM) {
-        int pad_y = CONTENT_Y + LIVE_LANE_TAB_H + LIVE_PAD_PAD;
-        int pad_area_h = TABBAR_Y - pad_y - LIVE_PAD_PAD;
-        int pad_w = (1280 - LIVE_PAD_PAD * 5) / 4;
-        int pad_h = (pad_area_h - LIVE_PAD_GAP) / 2;
-        static const char *PAD_NAMES[8] = {
-            "KICK","SNARE","HH-CL","HH-OP","CLAP","TOM","RIDE","CRASH"
-        };
-        for (int i = 0; i < 8; i++) {
-            int col = i % 4, row2 = i / 4;
-            int px = LIVE_PAD_PAD + col * (pad_w + LIVE_PAD_GAP);
-            int py = pad_y + row2 * (pad_h + LIVE_PAD_GAP);
-            if (pt_in(x, y, px, py, pad_w, pad_h)) {
-                drum_seq_t *seq = g_song.lanes[li].drum_seq;
-                if (seq && i < seq->row_count && !seq->rows[i].mute) {
-                    /* trigger via WS so the audio_task handles it uniformly */
-                    uint8_t trig[3] = { WS_CMD_DRUM_TRIGGER, (uint8_t)li, (uint8_t)i };
-                    ws_broadcast_raw(trig, sizeof(trig));
+        drum_seq_t *seq = g_song.lanes[li].drum_seq;
+        int rows[DRUM_MAX_ROWS];
+        int npads = live_drum_collect(seq, rows, DRUM_MAX_ROWS);
+        if (npads == 0) return false;
+
+        int pages    = (npads + LIVE_PAD_PER_PAGE - 1) / LIVE_PAD_PER_PAGE;
+        bool has_bar = pages > 1;
+        if (s_live_pad_page >= pages) s_live_pad_page = pages - 1;
+        if (s_live_pad_page < 0)      s_live_pad_page = 0;
+
+        /* Page strip: left third = prev, right third = next */
+        if (has_bar) {
+            int bar_y = TABBAR_Y - LIVE_PAGE_BAR_H;
+            if (pt_in(x, y, 0, bar_y, 1280, LIVE_PAGE_BAR_H)) {
+                if (x < 1280 / 3) {
+                    if (s_live_pad_page > 0) s_live_pad_page--;
+                } else if (x >= 1280 * 2 / 3) {
+                    if (s_live_pad_page < pages - 1) s_live_pad_page++;
                 }
-                (void)PAD_NAMES;
+                return true;
+            }
+        }
+
+        int base = s_live_pad_page * LIVE_PAD_PER_PAGE;
+        for (int slot = 0; slot < LIVE_PAD_PER_PAGE; slot++) {
+            int idx = base + slot;
+            if (idx >= npads) break;
+            int px, py, pw, ph;
+            live_drum_pad_rect(has_bar, slot, &px, &py, &pw, &ph);
+            if (pt_in(x, y, px, py, pw, ph)) {
+                int r = rows[idx];
+                if (!seq->rows[r].mute) {
+                    /* dispatch locally so the audio_task handles it uniformly.
+                     * 4-byte frame: cmd, lane, row, velocity. */
+                    uint8_t trig[4] = { WS_CMD_DRUM_TRIGGER, (uint8_t)li,
+                                        (uint8_t)r, 110 };
+                    ws_cmd_dispatch(trig, sizeof(trig), -1);
+                }
                 return true;
             }
         }
@@ -746,7 +852,7 @@ static bool handle_master_tap(int x, int y)
         }
     }
 
-    /* Col 2: Master FX slots */
+    /* Col 2: Master FX slots — open the full FX editor (target = master). */
     {
         int mfx_slots   = FX_MAX_PER_LANE;
         int mfx_slot_w  = (col2_w - 48 - (mfx_slots - 1) * 10) / mfx_slots;
@@ -754,22 +860,26 @@ static bool handle_master_tap(int x, int y)
         for (int i = 0; i < mfx_slots; i++) {
             int sx2 = col2_x + 24 + i * (mfx_slot_w + 10);
             if (pt_in(x, y, sx2, sy, mfx_slot_w, 80)) {
-                s_fx_sel_slot = i;
+                s_fx_target   = FX_TGT_MASTER;
+                s_fx_sel_slot = (i < g_song.master_fx_count) ? i
+                                                             : g_song.master_fx_count;
+                push_screen(SCREEN_FX_ADSR);
                 if (i >= g_song.master_fx_count) {
-                    fx_node_t *node = fx_new(FX_TYPE_FILTER);
-                    if (node) {
-                        fx_chain_insert(g_song.master_fx,
-                                        &g_song.master_fx_count,
-                                        g_song.master_fx_count, node);
-                    }
-                    g_song.dirty = true;
-                } else if (g_song.master_fx[i]) {
-                    g_song.master_fx[i]->enabled = !g_song.master_fx[i]->enabled;
-                    g_song.dirty = true;
+                    s_fx_picker_open        = true;
+                    s_fx_picker_target_slot = g_song.master_fx_count;
+                    s_fx_picker_replace     = false;
+                    s_fx_picker_scroll      = 0;
                 }
-                ws_notify_change(WS_MSG_FX_UPDATE, 0xFF);
                 return true;
             }
+        }
+
+        /* SEND FX button — sits below the master FX slot row in col 2. */
+        if (pt_in(x, y, col2_x + 24, sy + 92, col2_w - 48, 48)) {
+            s_fx_target   = FX_TGT_SEND;
+            s_fx_sel_slot = 0;
+            push_screen(SCREEN_FX_ADSR);
+            return true;
         }
     }
 
@@ -882,6 +992,30 @@ static bool handle_menu_tap(int x, int y)
     return false;
 }
 
+/* Append a blank drum row and immediately open the sound browser so the user
+ * can assign a sample. Shared by the minibar +ROW button. */
+static bool drum_grid_add_row(drum_seq_t *seq)
+{
+    if (!seq || seq->row_count >= DRUM_MAX_ROWS) return false;
+    int ri = seq->row_count;
+    memset(&seq->rows[ri], 0, sizeof(drum_row_t));
+    seq->rows[ri].volume     = 1.0f;
+    seq->rows[ri].step_count = (uint8_t)seq->step_count;
+    seq->row_count++;
+    g_song.dirty = true;
+    ws_notify_change(WS_MSG_DRUM_STEP, (s_ctx_lane << 8) | ri);
+    s_ctx_drum_row = ri;
+    if (s_sb_dirty) {
+        sb_load_kits();
+        s_sb_kit_sel = 0; s_sb_file_sel = 0;
+        s_sb_kit_scroll = 0; s_sb_file_scroll = 0; s_sb_kit_px = 0.0f; s_sb_file_px = 0.0f; s_sb_kit_vel = 0.0f; s_sb_file_vel = 0.0f;
+        sb_load_files(0);
+        s_sb_dirty = false;
+    }
+    push_screen(SCREEN_SOUND_BROWSER);
+    return true;
+}
+
 /* ── DRUM GRID taps ──────────────────────────────────────────────────────── */
 static bool handle_drum_grid_tap(int x, int y)
 {
@@ -900,6 +1034,7 @@ static bool handle_drum_grid_tap(int x, int y)
         if (pt_in(x, y, 900, 10, 48, 52) && cur_bars > 1) {
             cur_bars--;
             lane->loop_len_ticks = (uint32_t)(cur_bars * bar_t);
+            drum_seq_update_timing(seq, lane->loop_len_ticks);
             g_song.dirty = true;
             ws_notify_change(WS_MSG_LANE_UPDATE, s_ctx_lane);
             return true;
@@ -908,22 +1043,33 @@ static bool handle_drum_grid_tap(int x, int y)
         if (pt_in(x, y, 956, 10, 48, 52) && cur_bars < 8) {
             cur_bars++;
             lane->loop_len_ticks = (uint32_t)(cur_bars * bar_t);
+            drum_seq_update_timing(seq, lane->loop_len_ticks);
             g_song.dirty = true;
             ws_notify_change(WS_MSG_LANE_UPDATE, s_ctx_lane);
             return true;
         }
-        /* STEPS − */
+        /* STEPS −  (rescale the pattern so existing hits keep their timing) */
         if (pt_in(x, y, 1152, 10, 48, 52) && seq->step_count > 4) {
-            seq->step_count -= 4;
+            drum_seq_set_step_count(seq, seq->step_count - 4, lane->loop_len_ticks);
             g_song.dirty = true;
             ws_notify_change(WS_MSG_DRUM_STEP, s_ctx_lane << 8);
             return true;
         }
-        /* STEPS + */
+        /* STEPS +  (rescale the pattern so existing hits keep their timing) */
         if (pt_in(x, y, 1208, 10, 48, 52) && seq->step_count < DRUM_MAX_STEPS) {
-            seq->step_count += 4;
+            drum_seq_set_step_count(seq, seq->step_count + 4, lane->loop_len_ticks);
             g_song.dirty = true;
             ws_notify_change(WS_MSG_DRUM_STEP, s_ctx_lane << 8);
+            return true;
+        }
+        /* +ROW (moved up from the toolbar to free space) */
+        if (pt_in(x, y, 380, 10, 150, 52)) {
+            drum_grid_add_row(seq);
+            return true;
+        }
+        /* EUCL (moved up from the toolbar to free space) */
+        if (pt_in(x, y, 540, 10, 150, 52)) {
+            s_eucl_popup = !s_eucl_popup;
             return true;
         }
         return false;
@@ -950,33 +1096,12 @@ static bool handle_drum_grid_tap(int x, int y)
         return false;
     }
 
-    /* ADD ROW toolbar button — create blank row then open sound browser */
-    if (pt_in(x, y, 524, tb_y + 8, 148, 56)) {
-        if (seq && seq->row_count < DRUM_MAX_ROWS) {
-            int ri = seq->row_count;
-            memset(&seq->rows[ri], 0, sizeof(drum_row_t));
-            seq->rows[ri].volume     = 1.0f;
-            seq->rows[ri].step_count = (uint8_t)seq->step_count;
-            seq->row_count++;
-            g_song.dirty = true;
-            ws_notify_change(WS_MSG_DRUM_STEP, (s_ctx_lane << 8) | ri);
-            /* Immediately open sound browser so user can assign a sample */
-            s_ctx_drum_row = ri;
-            if (s_sb_dirty) {
-                sb_load_kits();
-                s_sb_kit_sel = 0; s_sb_file_sel = 0;
-                s_sb_kit_scroll = 0; s_sb_file_scroll = 0; s_sb_kit_px = 0.0f; s_sb_file_px = 0.0f; s_sb_kit_vel = 0.0f; s_sb_file_vel = 0.0f;
-                sb_load_files(0);
-                s_sb_dirty = false;
-            }
-            push_screen(SCREEN_SOUND_BROWSER);
-        }
-        return true;
-    }
-
-    /* EUCL toolbar button */
-    if (pt_in(x, y, 688, tb_y + 8, 148, 56)) {
-        s_eucl_popup = !s_eucl_popup;
+    /* CLEAR toolbar button — wipe every row's step pattern */
+    if (pt_in(x, y, 24, tb_y + 8, 152, 56)) {
+        for (int r = 0; r < seq->row_count; r++)
+            memset(seq->rows[r].steps, 0, sizeof(seq->rows[r].steps));
+        g_song.dirty = true;
+        ws_notify_change(WS_MSG_DRUM_STEP, s_ctx_lane << 8);
         return true;
     }
 
@@ -985,31 +1110,23 @@ static bool handle_drum_grid_tap(int x, int y)
         int ep_x = 160, ep_y = 300, ep_w = 960, ep_h = 200;
         /* GEN button */
         if (pt_in(x, y, ep_x + ep_w - 200, ep_y + ep_h - 60, 160, 44)) {
-            /* apply to selected row (first row as default) */
+            /* Generate over the visible (global) step count so the result lines
+             * up with the grid; apply to the top visible row. */
             int ri = (s_dg_row_offset < seq->row_count) ? s_dg_row_offset : 0;
             if (seq->row_count > 0)
-                drum_seq_euclidean(&seq->rows[ri], s_eucl_hits, s_eucl_steps, 100);
+                drum_seq_euclidean(&seq->rows[ri], s_eucl_hits, seq->step_count, 100);
             s_eucl_popup = false;
             g_song.dirty = true;
             ws_notify_change(WS_MSG_DRUM_STEP, (s_ctx_lane << 8) | ri);
             return true;
         }
-        /* Hits -/+ */
+        /* Hits -/+ (clamped to the current global step count) */
         if (pt_in(x, y, ep_x + 280, ep_y + 80, 52, 52)) {
             if (s_eucl_hits > 1) s_eucl_hits--;
             return true;
         }
         if (pt_in(x, y, ep_x + 340, ep_y + 80, 52, 52)) {
-            if (s_eucl_hits < s_eucl_steps) s_eucl_hits++;
-            return true;
-        }
-        /* Steps -/+ */
-        if (pt_in(x, y, ep_x + 560, ep_y + 80, 52, 52)) {
-            if (s_eucl_steps > 2) s_eucl_steps--;
-            return true;
-        }
-        if (pt_in(x, y, ep_x + 620, ep_y + 80, 52, 52)) {
-            if (s_eucl_steps < 32) s_eucl_steps++;
+            if (s_eucl_hits < seq->step_count) s_eucl_hits++;
             return true;
         }
         /* Tap outside to dismiss */
@@ -1275,7 +1392,7 @@ static bool handle_piano_roll_tap(int x, int y)
 /* Slider geometry mirrors draw_fx_adsr_screen() exactly. */
 #define FX_SLIDER_TRACK_X 240
 #define FX_SLIDER_TRACK_W 880
-#define FX_SLIDER_ROW_H   44
+#define FX_SLIDER_ROW_H   52
 
 /* Picker tap: returns true if consumed (and possibly mutates picker state). */
 static bool handle_fx_picker_tap(int x, int y)
@@ -1283,12 +1400,14 @@ static bool handle_fx_picker_tap(int x, int y)
     int mx = FX_PICKER_MX, my = FX_PICKER_MY, mw = FX_PICKER_MW, mh = FX_PICKER_MH;
     /* Tap outside modal closes. */
     if (!pt_in(x, y, mx, my, mw, mh)) {
-        s_fx_picker_open = false;
+        s_fx_picker_open    = false;
+        s_fx_picker_replace = false;
         return true;
     }
     /* Close X */
     if (pt_in(x, y, mx + mw - 60, my + 14, 44, 36)) {
-        s_fx_picker_open = false;
+        s_fx_picker_open    = false;
+        s_fx_picker_replace = false;
         return true;
     }
     int cols = FX_PICKER_COLS, item_w = (mw - 48) / cols, item_h = 72;
@@ -1301,27 +1420,40 @@ static bool handle_fx_picker_tap(int x, int y)
     int total = (int)FX_TYPE_COUNT - 1;
     if (idx < 0 || idx >= total) return true;
     int tid = idx + 1;  /* skip NONE */
-    lane_t *lane = &g_song.lanes[s_ctx_lane];
-    int target = s_fx_picker_target_slot;
-    if (target < 0 || target > lane->fx_count) target = lane->fx_count;
+    int *fx_count; int notify;
+    fx_node_t **chain = fx_target_resolve(s_fx_target, &fx_count, NULL, &notify);
+    int slot = s_fx_picker_target_slot;
     fx_node_t *node = fx_new((fx_type_t)tid);
-    if (node && fx_chain_insert(lane->fx, &lane->fx_count, target, node)) {
-        s_fx_sel_slot = target;
-        g_song.dirty  = true;
-        ws_notify_change(WS_MSG_FX_UPDATE, s_ctx_lane);
-    } else if (node) {
-        node->free(node);
+    if (node) {
+        bool ok;
+        if (s_fx_picker_replace && slot >= 0 && slot < *fx_count && chain[slot]) {
+            /* Replace the effect occupying this slot, keeping its position. */
+            fx_chain_remove(chain, fx_count, slot);
+            ok = fx_chain_insert(chain, fx_count, slot, node);
+        } else {
+            if (slot < 0 || slot > *fx_count) slot = *fx_count;
+            ok = fx_chain_insert(chain, fx_count, slot, node);
+        }
+        if (ok) {
+            s_fx_sel_slot = slot;
+            g_song.dirty  = true;
+            ws_notify_change(WS_MSG_FX_UPDATE, notify);
+        } else {
+            node->free(node);
+        }
     }
-    s_fx_picker_open = false;
+    s_fx_picker_open    = false;
+    s_fx_picker_replace = false;
     return true;
 }
 
 /* Set the param value for current selected fx from a touch x within slider. */
 static void fx_slider_set_from_x(int pi, int touch_x)
 {
-    lane_t *lane = &g_song.lanes[s_ctx_lane];
-    if (s_fx_sel_slot >= lane->fx_count || !lane->fx[s_fx_sel_slot]) return;
-    fx_node_t *node = lane->fx[s_fx_sel_slot];
+    int *fx_count;
+    fx_node_t **chain = fx_target_resolve(s_fx_target, &fx_count, NULL, NULL);
+    if (s_fx_sel_slot >= *fx_count || !chain[s_fx_sel_slot]) return;
+    fx_node_t *node = chain[s_fx_sel_slot];
     const char *lbl; float pmin, pmax; int dec;
     fx_param_descriptor((int)node->type, pi, &lbl, &pmin, &pmax, &dec);
     float t = (float)(touch_x - FX_SLIDER_TRACK_X) / (float)FX_SLIDER_TRACK_W;
@@ -1334,6 +1466,23 @@ static void fx_slider_set_from_x(int pi, int touch_x)
     g_song.dirty = true;
 }
 
+/* Apply a relative drag delta to one lane-ADSR knob (0=A 1=D 2=S 3=R). */
+static void fx_adsr_drag_apply(lane_adsr_t *a, int knob, int dy)
+{
+    /* Upward drag (negative dy) increases value. */
+    float delta = (float)(-dy);
+    float atk = a->atk_ms, dcy = a->dcy_ms, sus = a->sus, rel = a->rel_ms;
+    switch (knob) {
+    case 0: atk = clampf(s_fx_adsr_drag_start + delta * 4.0f, 1.0f, 2000.0f); break;
+    case 1: dcy = clampf(s_fx_adsr_drag_start + delta * 4.0f, 1.0f, 2000.0f); break;
+    case 2: sus = clampf(s_fx_adsr_drag_start + delta * 0.004f, 0.0f, 1.0f);  break;
+    case 3: rel = clampf(s_fx_adsr_drag_start + delta * 8.0f, 1.0f, 4000.0f); break;
+    default: return;
+    }
+    lane_adsr_set_params(a, atk, dcy, sus, rel);
+    g_song.dirty = true;
+}
+
 /* ── FX+ADSR taps ────────────────────────────────────────────────────────── */
 static bool handle_fx_adsr_tap(int x, int y)
 {
@@ -1342,19 +1491,52 @@ static bool handle_fx_adsr_tap(int x, int y)
 
     if (handle_minibar_back(x, y)) return true;
 
-    lane_t *lane    = &g_song.lanes[s_ctx_lane];
-    int slot_y      = MINIBAR_H + 156 + 22;
-    int arrow_w     = 20;
-    int slot_w      = (1248 - (FX_MAX_PER_LANE - 1) * arrow_w) / FX_MAX_PER_LANE;
+    int        *fx_count;
+    lane_adsr_t *adsr;
+    int          notify;
+    fx_node_t **chain = fx_target_resolve(s_fx_target, &fx_count, &adsr, &notify);
+
+    int y_top = MINIBAR_H + 16;
+
+    /* Lane ADSR knobs (lane targets only) — tap a knob to start a drag. */
+    if (adsr) {
+        for (int i = 0; i < 4; i++) {
+            int kx = 420 + i * 200;
+            int ky = y_top + 30;
+            if (pt_in(x, y, kx, ky, 80, 80)) {
+                s_fx_adsr_drag   = i;
+                s_fx_adsr_drag_y = y;
+                s_fx_adsr_drag_start = (i == 0) ? adsr->atk_ms :
+                                       (i == 1) ? adsr->dcy_ms :
+                                       (i == 2) ? adsr->sus    : adsr->rel_ms;
+                return true;
+            }
+        }
+    }
+
+    /* FX chain row sits below the ADSR card (if present). */
+    int slot_y  = adsr ? (y_top + 156 + 22) : (y_top + 22);
+    int arrow_w = 20;
+    int slot_w  = (1248 - (FX_MAX_PER_LANE - 1) * arrow_w) / FX_MAX_PER_LANE;
 
     /* Slot row tap */
     if (pt_in(x, y, 16, slot_y, 1248, 80)) {
         int slot_i = (x - 16) / (slot_w + arrow_w);
         slot_i = clamp_i(slot_i, 0, FX_MAX_PER_LANE - 1);
-        if (slot_i >= lane->fx_count) {
+        if (slot_i >= *fx_count) {
             /* Empty slot — open type picker for this insertion point. */
             s_fx_picker_open        = true;
-            s_fx_picker_target_slot = lane->fx_count;
+            s_fx_picker_target_slot = *fx_count;
+            s_fx_picker_replace     = false;
+            s_fx_picker_scroll      = 0;
+            return true;
+        }
+        if (slot_i == s_fx_sel_slot) {
+            /* Tapping the already-selected effect re-opens the picker so the
+             * effect type can be swapped in place. */
+            s_fx_picker_open        = true;
+            s_fx_picker_target_slot = slot_i;
+            s_fx_picker_replace     = true;
             s_fx_picker_scroll      = 0;
             return true;
         }
@@ -1363,17 +1545,33 @@ static bool handle_fx_adsr_tap(int x, int y)
     }
 
     /* Slot detail panel */
-    if (s_fx_sel_slot < lane->fx_count && lane->fx[s_fx_sel_slot]) {
+    if (s_fx_sel_slot < *fx_count && chain[s_fx_sel_slot]) {
         int detail_y = slot_y + 96;
-        /* Enable button */
-        if (pt_in(x, y, 1170, detail_y + 12, 76, 36)) {
-            lane->fx[s_fx_sel_slot]->enabled = !lane->fx[s_fx_sel_slot]->enabled;
+        /* CHANGE button — re-open the picker in replace mode */
+        if (pt_in(x, y, 852, detail_y + 8, 156, 44)) {
+            s_fx_picker_open        = true;
+            s_fx_picker_target_slot = s_fx_sel_slot;
+            s_fx_picker_replace     = true;
+            s_fx_picker_scroll      = 0;
+            return true;
+        }
+        /* DELETE button — large, easy-to-hit target */
+        if (pt_in(x, y, 1016, detail_y + 8, 140, 44)) {
+            fx_chain_remove(chain, fx_count, s_fx_sel_slot);
+            if (s_fx_sel_slot >= *fx_count && s_fx_sel_slot > 0) s_fx_sel_slot--;
             g_song.dirty = true;
-            ws_notify_change(WS_MSG_FX_UPDATE, s_ctx_lane);
+            ws_notify_change(WS_MSG_FX_UPDATE, notify);
+            return true;
+        }
+        /* Enable button */
+        if (pt_in(x, y, 1168, detail_y + 8, 80, 44)) {
+            chain[s_fx_sel_slot]->enabled = !chain[s_fx_sel_slot]->enabled;
+            g_song.dirty = true;
+            ws_notify_change(WS_MSG_FX_UPDATE, notify);
             return true;
         }
         /* Slider tap = start drag + set value */
-        fx_node_t *node = lane->fx[s_fx_sel_slot];
+        fx_node_t *node = chain[s_fx_sel_slot];
         int n_params = fx_param_count((int)node->type);
         int rows_top = detail_y + 60;
         for (int pi = 0; pi < n_params && pi < 8; pi++) {
@@ -1572,6 +1770,7 @@ static bool handle_wav_detail_tap(int x, int y)
     /* FX button */
     if (pt_in(x, y, 440, MINIBAR_H + 52, 280, 56)) {
         s_fx_sel_slot = 0;
+        s_fx_target   = s_ctx_lane;
         push_screen(SCREEN_FX_ADSR);
         return true;
     }
@@ -1965,6 +2164,52 @@ static bool handle_piano_touch(tp_pt_t *pts, int cnt)
     return changed;
 }
 
+/* Render the live piano tear-free without stalling the touch poll.
+ *
+ * A full draw_screen() clears and repaints all 1280×720 px (tens of ms of PSRAM
+ * writes); doing that on every note edge starves the touch poll and swallows
+ * fast re-taps. Writing key highlights straight into the scanned buffer instead
+ * is cheap but tears. So: draw only what changed into the *back* buffer and
+ * present it by swap (tear-free), and gate the whole thing on the non-blocking
+ * gfx_present_ready() so the poll never waits on vsync.
+ *
+ * Updates target one buffer per frame, so a change propagates to both buffers
+ * over two presents. Chrome (tabs/octave bar) is repainted via a full
+ * draw_screen() only when the buffer's s_live_chrome_dirty flag is set. */
+static void live_piano_render(void)
+{
+    int bi = gfx_back_index();
+
+    bool keys_differ = false;
+    for (int k = 0; k < s_key_cnt; k++)
+        if (s_key_shown[bi][k] != s_piano_keys[k].pressed) { keys_differ = true; break; }
+
+    if (!s_live_chrome_dirty[bi] && !keys_differ) return;  /* back buffer current */
+    if (!gfx_present_ready()) return;                      /* still scanning; retry next frame */
+
+    if (s_live_chrome_dirty[bi]) {
+        draw_screen();                  /* full repaint of this buffer (chrome + keys); commits */
+        s_live_chrome_dirty[bi] = false;
+    } else {
+        /* Keys are stored white-first then black; black keys overlap the top of
+         * adjacent white keys, so repainting a changed white key erases the
+         * black keys drawn over it.  Redraw changed keys in order (whites before
+         * blacks), then repaint all black keys on top if any white changed. */
+        bool white_changed = false;
+        for (int k = 0; k < s_key_cnt; k++)
+            if (s_key_shown[bi][k] != s_piano_keys[k].pressed) {
+                draw_live_piano_key(k); /* into g_fb (back buffer) */
+                if (!s_piano_keys[k].is_black) white_changed = true;
+            }
+        if (white_changed)
+            for (int k = 0; k < s_key_cnt; k++)
+                if (s_piano_keys[k].is_black) draw_live_piano_key(k);
+        gfx_commit();                   /* present + swap */
+    }
+    for (int k = 0; k < s_key_cnt; k++)
+        s_key_shown[bi][k] = s_piano_keys[k].pressed;
+}
+
 /* ── OSK callbacks ───────────────────────────────────────────────────────── */
 static void osk_cb_lane_rename(const char *text)
 {
@@ -2291,15 +2536,16 @@ static bool handle_touch_down(int x, int y)
                 s_osk_done_cb = osk_cb_lane_rename;
                 push_screen(SCREEN_OSK);
             }
-        /* CHANGE TYPE: y=288..344 — cycle SYNTH→DRUM→SAMPLE→SYNTH */
+        /* CHANGE TYPE: y=288..344 — cycle SYNTH→DRUM→DRUMSYNTH→SAMPLE→SYNTH */
         } else if (pt_in(x, y, 160, 288, 960, 56)) {
             int li = s_ctx_menu_lane;
             if (li >= 0 && li < NUM_LANES) {
                 lane_t *ln = &g_song.lanes[li];
                 lane_type_t next;
-                if      (ln->type == LANE_TYPE_SYNTH) next = LANE_TYPE_DRUM;
-                else if (ln->type == LANE_TYPE_DRUM)  next = LANE_TYPE_WAV;
-                else                                   next = LANE_TYPE_SYNTH;
+                if      (ln->type == LANE_TYPE_SYNTH)     next = LANE_TYPE_DRUM;
+                else if (ln->type == LANE_TYPE_DRUM)      next = LANE_TYPE_DRUMSYNTH;
+                else if (ln->type == LANE_TYPE_DRUMSYNTH) next = LANE_TYPE_WAV;
+                else                                       next = LANE_TYPE_SYNTH;
                 ln->type = next;
                 if (next == LANE_TYPE_SYNTH) {
                     if (!ln->synth)      ln->synth      = synth_new(SYNTH_TYPE_POLY_WT);
@@ -2311,6 +2557,14 @@ static bool handle_touch_down(int x, int y)
                         if (ln->drum_seq)
                             drum_seq_update_timing(ln->drum_seq, ln->loop_len_ticks);
                     }
+                } else if (next == LANE_TYPE_DRUMSYNTH) {
+                    if (!ln->dsyn) {
+                        ln->dsyn = dsyn_alloc();
+                        if (ln->dsyn) {
+                            dsyn_update_timing(ln->dsyn, ln->loop_len_ticks);
+                            dsyn_reset(ln->dsyn, ln->lane_tick);
+                        }
+                    }
                 }
                 g_song.dirty = true;
                 ws_notify_change(WS_MSG_LANE_UPDATE, li);
@@ -2321,14 +2575,14 @@ static bool handle_touch_down(int x, int y)
             s_ctx_menu_open = false;
             if (s_ctx_menu_lane >= 0) {
                 uint8_t buf[2] = { WS_CMD_DUPLICATE_LANE, (uint8_t)s_ctx_menu_lane };
-                ws_broadcast_raw(buf, 2);
+                ws_cmd_dispatch(buf, 2, -1);
             }
         /* DELETE: y=432..488 */
         } else if (pt_in(x, y, 160, 432, 960, 56)) {
             s_ctx_menu_open = false;
             if (s_ctx_menu_lane >= 0) {
                 uint8_t buf[2] = { WS_CMD_DEL_LANE, (uint8_t)s_ctx_menu_lane };
-                ws_broadcast_raw(buf, 2);
+                ws_cmd_dispatch(buf, 2, -1);
             }
         /* SYNTH EDIT: y=504..560 — only active for synth lanes */
         } else if (pt_in(x, y, 160, 504, 960, 56)) {
@@ -2467,6 +2721,8 @@ void ui_task(void *arg)
 
     draw_screen();
 
+    bool s_live_piano_was_shown = false;
+
     while (1) {
         tp_pt_t pts[5];
         int cnt = touch_get_points(pts, 5);
@@ -2475,6 +2731,9 @@ void ui_task(void *arg)
         bool need_redraw = false;
 
         screen_id_t scr = current_screen();
+        /* True while a synth piano is showing on LIVE; used below to keep key
+         * taps off the full-redraw path so fast re-taps aren't swallowed. */
+        bool live_piano_shown = false;
         if (scr == SCREEN_LIVE) {
             int li = -1, cnt2 = 0;
             for (int i = 0; i < NUM_LANES; i++) {
@@ -2483,16 +2742,27 @@ void ui_task(void *arg)
                 cnt2++;
             }
             bool is_piano = (li >= 0 && g_song.lanes[li].type == LANE_TYPE_SYNTH);
+            live_piano_shown = is_piano;
             if (is_piano) {
                 if (s_key_cnt == 0) setup_live_piano_keys();
+                /* On entering the live piano, neither buffer is guaranteed to
+                 * hold its chrome — force a full repaint of both. */
+                if (!s_live_piano_was_shown)
+                    s_live_chrome_dirty[0] = s_live_chrome_dirty[1] = true;
+                /* Only touches within the key band are note input; anything
+                 * below the keys (OCT bar, tab/nav bar) must fall through to
+                 * the generic dispatch path. */
+                int key_top = s_key_cnt > 0 ? s_piano_keys[0].y : 0;
+                int key_bot = s_key_cnt > 0 ? s_piano_keys[0].y + s_piano_keys[0].h : 0;
                 tp_pt_t piano_pts[5];
                 int piano_cnt = 0;
                 for (int i = 0; i < cnt; i++) {
-                    if (s_key_cnt > 0 && pts[i].y >= s_piano_keys[0].y)
+                    if (s_key_cnt > 0 && pts[i].y >= key_top && pts[i].y < key_bot)
                         piano_pts[piano_cnt++] = pts[i];
                 }
-                if (handle_piano_touch(piano_pts, piano_cnt))
-                    need_redraw = true;
+                /* Note on/off is queued to audio immediately here; the visual
+                 * key state is rendered tear-free below by live_piano_render(). */
+                handle_piano_touch(piano_pts, piano_cnt);
             }
         }
 
@@ -2540,13 +2810,22 @@ void ui_task(void *arg)
             s_pr_aud_cnt = cur_cnt;
         }
 
-        if (cnt > 0) {
+        /* A finger in the live piano key strip is pure note input — already
+         * handled and blitted above.  Routing it through the generic touch-down
+         * path would request a full draw_screen() on every press and stall the
+         * touch poll, which is exactly what swallows fast re-taps, so skip it. */
+        bool live_key_press = (live_piano_shown && cnt > 0 && s_key_cnt > 0 &&
+                               pts[0].y >= s_piano_keys[0].y &&
+                               pts[0].y <  s_piano_keys[0].y + s_piano_keys[0].h);
+
+        if (cnt > 0 && !live_key_press) {
             int sx = pts[0].x, sy = pts[0].y;
             if (!s_touch_down) {
                 s_down_x = sx; s_down_y = sy;
                 /* Initialise drag baseline so the first move delta is zero
                  * rather than the stale value from the previous gesture. */
                 s_drag_x = sx; s_drag_y = sy;
+                s_scroll_anchor_y = sy;
                 /* Show touch-ring highlight this frame */
                 s_hl_x = sx; s_hl_y = sy; s_hl_visible = true;
                 need_redraw = true;
@@ -2635,14 +2914,14 @@ void ui_task(void *arg)
                 if (scr == SCREEN_SONG) {
                     /* Vertical scroll — only when not dragging the vol fader */
                     if (!s_vol_fader_drag) {
-                        int dy = sy - s_drag_y;
+                        int dy = sy - s_scroll_anchor_y;
                         if (dy > LANE_ROW_H / 2) {
                             if (s_song_scroll > 0) { s_song_scroll--; need_redraw = true; }
-                            s_drag_y = sy;
+                            s_scroll_anchor_y = sy;
                         } else if (dy < -(LANE_ROW_H / 2)) {
                             s_song_scroll++;
                             need_redraw = true;
-                            s_drag_y = sy;
+                            s_scroll_anchor_y = sy;
                         }
                     }
                     if (s_vol_fader_drag && s_fader_drag_lane >= 0) {
@@ -2788,16 +3067,25 @@ void ui_task(void *arg)
                     fx_slider_set_from_x(s_fx_param_drag, sx);
                     need_redraw = true;
                 }
+                /* Lane ADSR knob drag (vertical) */
+                if (scr == SCREEN_FX_ADSR && s_fx_adsr_drag >= 0) {
+                    int *fxc; lane_adsr_t *adsr;
+                    fx_target_resolve(s_fx_target, &fxc, &adsr, NULL);
+                    if (adsr) {
+                        fx_adsr_drag_apply(adsr, s_fx_adsr_drag, sy - s_fx_adsr_drag_y);
+                        need_redraw = true;
+                    }
+                }
                 /* FX picker scroll (vertical drag) */
                 if (scr == SCREEN_FX_ADSR && s_fx_picker_open) {
-                    int dy = sy - s_drag_y;
+                    int dy = sy - s_scroll_anchor_y;
                     if (dy > 36) {
                         if (s_fx_picker_scroll > 0) { s_fx_picker_scroll--; need_redraw = true; }
-                        s_drag_y = sy;
+                        s_scroll_anchor_y = sy;
                     } else if (dy < -36) {
                         s_fx_picker_scroll++;
                         need_redraw = true;
-                        s_drag_y = sy;
+                        s_scroll_anchor_y = sy;
                     }
                 }
                 s_drag_x = sx; s_drag_y = sy;
@@ -2862,8 +3150,15 @@ void ui_task(void *arg)
                     s_sb_sb_drag = false;
                 }
                 if (s_fx_param_drag >= 0) {
-                    ws_notify_change(WS_MSG_FX_UPDATE, s_ctx_lane);
+                    int *fxc2; int notify2;
+                    fx_target_resolve(s_fx_target, &fxc2, NULL, &notify2);
+                    ws_notify_change(WS_MSG_FX_UPDATE, notify2);
                     s_fx_param_drag = -1;
+                }
+                if (s_fx_adsr_drag >= 0) {
+                    if (s_fx_target >= 0 && s_fx_target < NUM_LANES)
+                        ws_notify_change(WS_MSG_ADSR_UPDATE, s_fx_target);
+                    s_fx_adsr_drag = -1;
                 }
                 s_pr_drag_note    = -1;
                 s_pr_resize_note  = -1;
@@ -2879,11 +3174,12 @@ void ui_task(void *arg)
             }
         }
 
-        /* Always redraw piano roll, drum grid, and live screen while clock is
-         * running so the playhead position and key highlights stay current. */
-        if (!need_redraw && g_song.clock.running &&
-            (scr == SCREEN_PIANO_ROLL || scr == SCREEN_LIVE ||
-             scr == SCREEN_DRUM_GRID))
+        /* Animate the playhead / key highlights while the clock runs.  The
+         * repaint itself is rate-limited below, so this never throttles the
+         * per-iteration touch poll / note dispatch. */
+        if (g_song.clock.running &&
+            (scr == SCREEN_PIANO_ROLL || scr == SCREEN_DRUM_GRID ||
+             (scr == SCREEN_LIVE && !live_piano_shown)))
             need_redraw = true;
 
         /* Smooth-scroll momentum decay for sound browser.
@@ -2907,8 +3203,37 @@ void ui_task(void *arg)
             }
         }
 
-        if (need_redraw) draw_screen();
+        /* Repaint — rate-limited to ~30 fps on the playable screens.  Touch is
+         * polled and note events are queued to the audio engine every loop
+         * iteration regardless of drawing, so capping the (multi-ms) full-screen
+         * repaint here stops a burst of key presses — each requesting a redraw —
+         * from serialising repaints in front of the next touch poll and making
+         * notes lag. */
+        static int64_t s_last_draw_ms   = 0;
+        static bool    s_redraw_pending = false;
+        bool fast_poll = (scr == SCREEN_LIVE || scr == SCREEN_PIANO_ROLL);
+        bool cap_draw  = fast_poll || (scr == SCREEN_DRUM_GRID);
+        if (live_piano_shown) {
+            /* Live piano renders itself tear-free without blocking the poll: a
+             * chrome change repaints both buffers, key presses update only the
+             * changed keys into the back buffer. See live_piano_render(). */
+            if (need_redraw)
+                s_live_chrome_dirty[0] = s_live_chrome_dirty[1] = true;
+            live_piano_render();
+            s_redraw_pending = false;
+        } else {
+            if (need_redraw) s_redraw_pending = true;
+            if (s_redraw_pending) {
+                int64_t now_ms = esp_timer_get_time() / 1000;
+                if (!cap_draw || now_ms - s_last_draw_ms >= 33) {
+                    draw_screen();
+                    s_last_draw_ms   = now_ms;
+                    s_redraw_pending = false;
+                }
+            }
+        }
 
-        vTaskDelay(pdMS_TO_TICKS(16)); /* ~60 fps ceiling */
+        s_live_piano_was_shown = live_piano_shown;
+        vTaskDelay(pdMS_TO_TICKS(fast_poll ? 4 : 16));
     }
 }

@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>    /* tanhf — soft clipper */
 #include "audio.h"   /* SAMPLE_RATE */
 
 #ifdef __cplusplus
@@ -174,6 +175,26 @@ static inline float sv_svf_tick(sv_svf_t *f, float in)
     f->bp = f->f * f->hp + f->bp;
     f->lp = f->f * f->bp + f->lp;
     return f->lp;
+}
+
+/* ── Soft clipper ────────────────────────────────────────────────────────── */
+/* Tanh-knee limiter for an int32 sample, returning an int16-ranged value.
+ * Below SV_SOFTCLIP_TH the signal passes through bit-exact (the common case,
+ * and cheap); above it the level is smoothly compressed toward 0 dBFS so chord
+ * peaks and in-phase voice pile-ups saturate gently instead of hard-clipping or
+ * wrapping the int16 cast.  Used both per-synth (chord sum) and on the master
+ * bus (sum of lanes). */
+#define SV_SOFTCLIP_TH 0.75f
+static inline int32_t sv_soft_clip(int32_t v)
+{
+    float x = (float)v * (1.0f / 32768.0f);
+    float a = x < 0.0f ? -x : x;
+    if (a <= SV_SOFTCLIP_TH) return v;                 /* linear region */
+    float over = (a - SV_SOFTCLIP_TH) / (1.0f - SV_SOFTCLIP_TH);
+    float y = SV_SOFTCLIP_TH + (1.0f - SV_SOFTCLIP_TH) * tanhf(over);
+    int32_t o = (int32_t)(y * 32768.0f);
+    if (o > 32767) o = 32767;
+    return x < 0.0f ? -o : o;
 }
 
 #ifdef __cplusplus
