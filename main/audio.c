@@ -46,6 +46,16 @@ static const char *TAG = "audio";
 #define I2S_PORT       CONFIG_BSP_I2S_NUM
 #define MCLK_MULTIPLE  256
 
+/* ── PCM5102 external DAC — second I2S master output ─────────────────────────
+ * Wiring: VIN→5V, GND→GND, BCK→GPIO37, LRCK→GPIO28, DIN→GPIO21, SCK→GND.
+ * SCK grounded ⇒ the PCM5102 runs its internal PLL, so no MCLK is routed.
+ * The onboard ES8311 codec uses I2S port CONFIG_BSP_I2S_NUM (=1); the PCM5102
+ * gets its own port 0 and mirrors the same stereo buffer.                    */
+#define PCM_I2S_PORT   I2S_NUM_0
+#define PCM_BCK_IO     GPIO_NUM_37    /* BCK  — bit clock           */
+#define PCM_WS_IO      GPIO_NUM_28    /* LRCK — word/left-right clk */
+#define PCM_DO_IO      GPIO_NUM_21    /* DIN  — serial data         */
+
 /* ── Wavetable storage ───────────────────────────────────────────────────── */
 int16_t        wt_square  [WAVETABLE_SIZE];
 int16_t        wt_sawtooth[WAVETABLE_SIZE];
@@ -132,8 +142,9 @@ static void drain_note_queue(void)
 }
 
 /* ── I2S / codec handles ─────────────────────────────────────────────────── */
-static i2s_chan_handle_t      s_tx  = NULL;
-esp_codec_dev_handle_t        s_spk = NULL;
+static i2s_chan_handle_t      s_tx     = NULL;  /* ES8311 codec (port 1) */
+static i2s_chan_handle_t      s_tx_pcm = NULL;  /* PCM5102 DAC   (port 0) */
+esp_codec_dev_handle_t        s_spk    = NULL;
 
 static int16_t s_audio_buf[AUDIO_BUF_FRAMES * 2];
 
@@ -679,6 +690,10 @@ static void audio_task(void *arg)
 
         size_t written;
         i2s_channel_write(s_tx, s_audio_buf, sizeof(s_audio_buf), &written, portMAX_DELAY);
+        if (s_tx_pcm) {
+            size_t w_pcm;
+            i2s_channel_write(s_tx_pcm, s_audio_buf, sizeof(s_audio_buf), &w_pcm, portMAX_DELAY);
+        }
         ws_audio_push(s_audio_buf, AUDIO_BUF_FRAMES);
         if (render_export_active())
             render_export_write(s_audio_buf, AUDIO_BUF_FRAMES);
@@ -793,6 +808,28 @@ void audio_init(void)
     fs.bits_per_sample = 16;
     ESP_ERROR_CHECK(esp_codec_dev_open(s_spk, &fs));
     ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(s_spk, 100));
+
+    /* ── PCM5102 external DAC on a second I2S master ─────────────────────────
+     * Same role/clock/format as the codec so both DACs stay sample-locked.
+     * No control bus (PCM5102 is hardware-configured); just feed it I2S.    */
+    i2s_chan_config_t pcm_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(PCM_I2S_PORT, I2S_ROLE_MASTER);
+    pcm_chan_cfg.auto_clear    = true;
+    pcm_chan_cfg.dma_desc_num  = 4;
+    pcm_chan_cfg.dma_frame_num = AUDIO_BUF_FRAMES;
+    ESP_ERROR_CHECK(i2s_new_channel(&pcm_chan_cfg, &s_tx_pcm, NULL));
+
+    i2s_std_config_t pcm_cfg = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,            /* SCK→GND: PCM5102 internal PLL */
+            .bclk = PCM_BCK_IO, .ws = PCM_WS_IO,
+            .dout = PCM_DO_IO,  .din = I2S_GPIO_UNUSED,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+        },
+    };
+    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx_pcm, &pcm_cfg));
+    ESP_ERROR_CHECK(i2s_channel_enable(s_tx_pcm));
 
     for (int i = 0; i < NUM_VOICES; i++) { s_voices[i].st = ST_IDLE; s_voices[i].key_id = -1; }
     ws_audio_init();

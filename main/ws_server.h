@@ -32,6 +32,7 @@ typedef enum {
     WS_MSG_PLAYHEAD      = 0x0D,
     WS_MSG_SYNTH_PARAMS  = 0x0E,
     WS_MSG_AUDIO_DROPPED = 0x0F,
+    WS_MSG_DSYN_ROW      = 0x10,   /* analog 808 drum-synth row state */
 } ws_msg_type_t;
 
 /* ── Client → server command types ──────────────────────────────────────── */
@@ -75,6 +76,7 @@ typedef enum {
     WS_CMD_DRUM_EUCLIDEAN  = 0xA4,
     WS_CMD_SET_NOTE_REPEAT = 0xA5,
     WS_CMD_SET_SEND_LEVEL  = 0xA6,
+    WS_CMD_SET_DSYN        = 0xA8,   /* edit an 808 drum-synth row */
     WS_CMD_AUDIO_STREAM    = 0xF0,
 } ws_cmd_type_t;
 

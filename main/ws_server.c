@@ -195,6 +195,35 @@ static size_t ser_drum_row(uint8_t *buf, int li, int ri)
     return ext + 5;
 }
 
+/* WS_MSG_DSYN_ROW  — full state for one 808 drum-synth row.
+ *   [0] msg  [1] li  [2] ri  [3] voice  [4] step_count  [5] row_count
+ *   [6 ..33] 7 × f32 knobs: tune,decay,tone,snap,drive,level,pan
+ *   [34..97] velocity[64]   [98..161] accent[64]
+ */
+static size_t ser_dsyn_row(uint8_t *buf, int li, int ri)
+{
+    const lane_t *l = &g_song.lanes[li];
+    if (!l->dsyn || ri >= l->dsyn->row_count) return 0;
+    const dsyn_t        *ds = l->dsyn;
+    const dsyn_params_t *p  = &ds->params[ri];
+    buf[0] = WS_MSG_DSYN_ROW;
+    buf[1] = (uint8_t)li;
+    buf[2] = (uint8_t)ri;
+    buf[3] = (uint8_t)p->type;
+    buf[4] = ds->step_count;
+    buf[5] = ds->row_count;
+    const float knobs[7] = { p->tune, p->decay, p->tone, p->snap,
+                             p->drive, p->level, p->pan };
+    memcpy(buf + 6, knobs, sizeof(knobs));
+    size_t vo = 6 + sizeof(knobs);          /* 34 */
+    size_t ao = vo + DSYN_MAX_STEPS;        /* 98 */
+    for (int s = 0; s < DSYN_MAX_STEPS; s++) {
+        buf[vo + s] = ds->steps[ri][s].velocity;
+        buf[ao + s] = ds->steps[ri][s].accent ? 1 : 0;
+    }
+    return ao + DSYN_MAX_STEPS;             /* 162 */
+}
+
 /* WS_MSG_FX_UPDATE  [1 + 1 + 1 + 1 + 1 + 8*4 bytes per slot]
  * Sends all active FX slots for one lane as a sequence of fixed-size records:
  *   msg_type   u8    WS_MSG_FX_UPDATE
@@ -350,6 +379,13 @@ static void send_full_state(int fd)
                 if (n) ws_send_to(fd, buf, n);
             }
         }
+
+        if (g_song.lanes[i].dsyn) {
+            for (int r = 0; r < g_song.lanes[i].dsyn->row_count; r++) {
+                n = ser_dsyn_row(buf, i, r);
+                if (n) ws_send_to(fd, buf, n);
+            }
+        }
     }
 
     /* Master FX chain */
@@ -407,6 +443,14 @@ void ws_notify_change(ws_msg_type_t type, int idx)
             int li = (idx >> 8) & 0xFF;
             int ri =  idx       & 0xFF;
             n = ser_drum_row(buf, li, ri);
+        }
+        break;
+    case WS_MSG_DSYN_ROW:
+        /* idx encodes lane*256 + row */
+        if (idx >= 0) {
+            int li = (idx >> 8) & 0xFF;
+            int ri =  idx       & 0xFF;
+            n = ser_dsyn_row(buf, li, ri);
         }
         break;
     case WS_MSG_FX_UPDATE:

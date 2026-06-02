@@ -1419,7 +1419,7 @@ static bool handle_fx_picker_tap(int x, int y)
     int idx = (vr + s_fx_picker_scroll) * cols + c;
     int total = (int)FX_TYPE_COUNT - 1;
     if (idx < 0 || idx >= total) return true;
-    int tid = idx + 1;  /* skip NONE */
+    int tid = fx_type_for_display(idx);  /* alphabetical order */
     int *fx_count; int notify;
     fx_node_t **chain = fx_target_resolve(s_fx_target, &fx_count, NULL, &notify);
     int slot = s_fx_picker_target_slot;

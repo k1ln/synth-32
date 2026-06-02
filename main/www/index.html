@@ -110,6 +110,25 @@
   </div>
 </section>
 
+<!-- ── 808 DRUM SYNTH ─────────────────────────────────────────────────────── -->
+<section id="s-dsyn">
+  <div class="sh">808 SYNTH — <span id="dsyn-lane-name">—</span></div>
+  <div class="roll-toolbar">
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">steps:</span>
+    <select id="dsyn-steps-sel" style="background:var(--bg-3);color:var(--t0);border:1px solid var(--line-2);border-radius:6px;padding:0 6px;height:32px;font-family:var(--f-mono);font-size:11px" onchange="sendDsynStepCount(+this.value)">
+      <option value="8">8</option><option value="16" selected>16</option><option value="32">32</option><option value="64">64</option>
+    </select>
+    <span style="font-family:var(--f-mono);font-size:11px;color:var(--t2)">accent:</span>
+    <input type="range" id="dsyn-accent" min="100" max="300" value="150" style="width:90px" oninput="sendDsynAccent(this.value/100)">
+    <span style="flex:1"></span>
+    <button class="btn" onclick="if(selected_lane>=0)openFxEditor(selected_lane)">FX</button>
+  </div>
+  <div id="dsyn-root" style="padding:8px 12px;overflow:auto"></div>
+  <div style="padding:6px 12px;border-top:1px solid var(--line)">
+    <button class="btn" onclick="openDsynAddRow()" style="width:100%">+ ADD VOICE</button>
+  </div>
+</section>
+
 <!-- ── PIANO ROLL ─────────────────────────────────────────────────────────── -->
 <section id="s-roll">
   <div class="sh">PIANO ROLL — <span id="roll-lane-name">—</span></div>

@@ -235,6 +235,124 @@ static void cmd_set_drum_step(const uint8_t *p, size_t len, int sender_fd)
     ws_notify_except(WS_MSG_DRUM_STEP, (li << 8) | ri, sender_fd);
 }
 
+/* WS_CMD_SET_DSYN  — edit one analog 808 drum-synth lane.
+ *  p[0] lane_idx   p[1] op   (remaining bytes depend on op)
+ *   op 0 set step : ri, step, vel, accent
+ *   op 1 set knob : ri, knob_id(0..6), f32         (tune..pan)
+ *   op 2 set voice: ri, voice
+ *   op 3 add row  : voice
+ *   op 4 del row  : ri
+ *   op 5 step cnt : new_step_count (8/16/32/64)
+ *   op 6 trigger  : ri, vel        (live finger-drum)
+ *   op 7 clear row: ri
+ *   op 8 accent g : f32
+ */
+static void cmd_set_dsyn(const uint8_t *p, size_t len, int sender_fd)
+{
+    if (len < 2) return;
+    int li = p[0];
+    if (!lane_ok(li)) return;
+    dsyn_t *ds = g_song.lanes[li].dsyn;
+    if (!ds) return;
+    uint8_t op = p[1];
+    const uint8_t *a = p + 2;
+    size_t alen = len - 2;
+    int all_rows = -1;   /* set >=0 to broadcast every row instead of one */
+
+    switch (op) {
+    case 0: {  /* set step */
+        if (alen < 4) return;
+        int ri = a[0], si = a[1];
+        if (ri >= ds->row_count || si >= DSYN_MAX_STEPS) return;
+        ds->steps[ri][si].velocity    = a[2];
+        ds->steps[ri][si].accent      = a[3] != 0;
+        ds->steps[ri][si].probability = 100;
+        ws_notify_except(WS_MSG_DSYN_ROW, (li << 8) | ri, sender_fd);
+        break;
+    }
+    case 1: {  /* set knob */
+        if (alen < 6) return;
+        int ri = a[0], k = a[1];
+        if (ri >= ds->row_count || k > 6) return;
+        float v = rd_f32(a + 2);
+        dsyn_params_t *pr = &ds->params[ri];
+        float *fields[7] = { &pr->tune, &pr->decay, &pr->tone, &pr->snap,
+                             &pr->drive, &pr->level, &pr->pan };
+        *fields[k] = (k == 6) ? clampf(v, -1.0f, 1.0f) : clampf(v, 0.0f, 1.0f);
+        ws_notify_except(WS_MSG_DSYN_ROW, (li << 8) | ri, sender_fd);
+        break;
+    }
+    case 2: {  /* set voice type — resets that row to the voice default knobs */
+        if (alen < 2) return;
+        int ri = a[0];
+        if (ri >= ds->row_count) return;
+        dsyn_row_set_voice(ds, ri, (dsyn_voice_t)a[1]);
+        ws_notify_except(WS_MSG_DSYN_ROW, (li << 8) | ri, sender_fd);
+        break;
+    }
+    case 3: {  /* add row */
+        if (alen < 1 || ds->row_count >= DSYN_MAX_ROWS) return;
+        int ri = ds->row_count;
+        dsyn_row_set_voice(ds, ri, (dsyn_voice_t)a[0]);
+        memset(ds->steps[ri], 0, sizeof(ds->steps[ri]));
+        ds->state[ri].lfsr = 0x2545F491u + (uint32_t)ri * 0x9e3779b9u;
+        ds->row_count++;
+        dsyn_reset(ds, g_song.lanes[li].lane_tick);
+        all_rows = 1;
+        break;
+    }
+    case 4: {  /* delete row (shift up) */
+        if (alen < 1) return;
+        int ri = a[0];
+        if (ri >= ds->row_count) return;
+        for (int r = ri; r < ds->row_count - 1; r++) {
+            ds->params[r] = ds->params[r + 1];
+            memcpy(ds->steps[r], ds->steps[r + 1], sizeof(ds->steps[r]));
+        }
+        ds->row_count--;
+        memset(ds->steps[ds->row_count], 0, sizeof(ds->steps[ds->row_count]));
+        dsyn_reset(ds, g_song.lanes[li].lane_tick);
+        all_rows = 1;
+        break;
+    }
+    case 5: {  /* set global step count */
+        if (alen < 1) return;
+        uint8_t sc = a[0];
+        if (sc != 8 && sc != 16 && sc != 32 && sc != 64) return;
+        ds->step_count = sc;
+        dsyn_update_timing(ds, g_song.lanes[li].loop_len_ticks);
+        dsyn_reset(ds, g_song.lanes[li].lane_tick);
+        all_rows = 1;
+        break;
+    }
+    case 6: {  /* live trigger */
+        if (alen < 2) return;
+        dsyn_trigger_row(ds, a[0], a[1]);
+        return;   /* no state change to broadcast */
+    }
+    case 7: {  /* clear row pattern */
+        if (alen < 1) return;
+        int ri = a[0];
+        if (ri >= ds->row_count) return;
+        memset(ds->steps[ri], 0, sizeof(ds->steps[ri]));
+        ws_notify_except(WS_MSG_DSYN_ROW, (li << 8) | ri, sender_fd);
+        break;
+    }
+    case 8: {  /* accent gain */
+        if (alen < 4) return;
+        ds->accent_gain = clampf(rd_f32(a), 1.0f, 4.0f);
+        break;
+    }
+    default: return;
+    }
+
+    g_song.dirty = true;
+    if (all_rows >= 0) {
+        for (int r = 0; r < ds->row_count; r++)
+            ws_notify_change(WS_MSG_DSYN_ROW, (li << 8) | r);
+    }
+}
+
 /* WS_CMD_ADD_NOTE  [13 bytes payload]
  *  u8  lane_idx
  *  u32 tick_start
@@ -942,6 +1060,7 @@ void ws_cmd_dispatch(const uint8_t *frame, size_t len, int fd)
     case WS_CMD_SET_ARP:         cmd_set_arp(p, plen);             break;
     case WS_CMD_SET_DRUM_ROW:    cmd_set_drum_row(p, plen, fd);    break;
     case WS_CMD_SET_DRUM_STEP:   cmd_set_drum_step(p, plen, fd);   break;
+    case WS_CMD_SET_DSYN:        cmd_set_dsyn(p, plen, fd);        break;
     case WS_CMD_ADD_NOTE:        cmd_add_note(p, plen);            break;
     case WS_CMD_DEL_NOTE:        cmd_del_note(p, plen);            break;
     case WS_CMD_SET_FX:          cmd_set_fx(p, plen);              break;

@@ -71,6 +71,13 @@ struct drum_seq_s;
 int  live_drum_collect(const struct drum_seq_s *seq, int *rows_out, int max);
 void live_drum_pad_rect(bool has_bar, int slot, int *px, int *py, int *pw, int *ph);
 
+/* FX picker helpers (defined in ui_screens.c, shared with ui.c tap handling).
+ * fx_type_for_display maps an alphabetically-ordered picker slot to a type id;
+ * fx_param_enum_label returns a text label for discrete params (e.g. filter
+ * mode) or NULL for plain numeric sliders. */
+int         fx_type_for_display(int idx);
+const char *fx_param_enum_label(int tid, int pi, float v);
+
 /* Back zone in mini bar */
 #define MINIBAR_BACK_W   88
 

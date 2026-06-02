@@ -204,7 +204,14 @@ static void sd_stream_task(void *arg)
                     int extra = wav_read_native(&ln->wav, s_read_scratch + got * 2, remain);
                     got += extra;
                 } else if (got == 0) {
-                    ln->active = false;
+                    if (ln->retrigger_pending) {
+                        /* One-shot hit EOF but a fresh hit is queued. Keep the
+                         * lane active and drop the declick so wav_mix fires the
+                         * queued re-hit immediately instead of losing it. */
+                        ln->declick_frames = 0;
+                    } else {
+                        ln->active = false;
+                    }
                     continue;
                 }
             }
@@ -514,7 +521,17 @@ void wav_mix(int16_t *dst, int n_frames)
                     /* pcm_pos was already set to the frame offset, keep active */
                 }
                 if (ln->pcm_pos >= ln->pcm_frames) {
-                    if (ln->play_mode == WAV_MODE_LOOP) {
+                    if (ln->retrigger_pending) {
+                        /* A fresh hit is queued and the one-shot just ran out.
+                         * Fire it now instead of deactivating — otherwise the
+                         * lane goes inactive and the re-trigger is dropped, so
+                         * rapid re-hits near the sample tail feel like they
+                         * "wait" for the old sample to finish. */
+                        ln->pcm_pos           = ln->retrigger_pos;
+                        ln->volume            = ln->retrigger_vol;
+                        ln->retrigger_pending = false;
+                        ln->declick_frames    = 0;
+                    } else if (ln->play_mode == WAV_MODE_LOOP) {
                         ln->pcm_pos = 0;
                     } else {
                         ln->active = false;

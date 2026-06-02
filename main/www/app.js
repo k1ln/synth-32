@@ -10,6 +10,7 @@ function nav(id, btn) {
   document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   if (id === 'drum') renderDrumGrid();
+  if (id === 'dsyn') renderDsyn();
   if (id === 'roll') renderPianoRoll();
 }
 
@@ -19,6 +20,7 @@ function nav(id, btn) {
 const LP_PANELS = [
   { id: 'song',     label: 'SONG' },
   { id: 'drum',     label: 'DRUM GRID' },
+  { id: 'dsyn',     label: '808 SYNTH' },
   { id: 'roll',     label: 'PIANO ROLL' },
   { id: 'master',   label: 'MASTER' },
   { id: 'fx',       label: 'FX CHAIN' },
@@ -164,6 +166,7 @@ function laptopRender() {
 
     // trigger any needed renders for this panel
     if (panel.id === 'drum')    renderDrumGrid();
+    if (panel.id === 'dsyn')    renderDsyn();
     if (panel.id === 'roll')    renderPianoRoll();
     if (panel.id === 'live')    renderLive();
     if (panel.id === 'songs')   requestSongList();
@@ -205,6 +208,7 @@ const state = {
   master_pan: 0.0,
   lanes: [],         // lane objects from WS_MSG_LANE_UPDATE
   drum: {},          // lane_idx -> { rows: [ { steps:[], step_count } ] }
+  dsyn: {},          // lane_idx -> { step_count, row_count, rows:[{voice,knobs[7],steps[64],accents[64]}] }
   notes: {},         // lane_idx -> pr_note_t[]
   playhead: 0,       // master tick
   step: new Uint8Array(NUM_LANES).fill(0xFF), // per-lane current_step
@@ -262,6 +266,7 @@ const CMD = {
   SET_NOTE_REPEAT:  0xA5,
   SET_SEND_LEVEL:   0xA6,
   WT_IMPORT:        0xA7,
+  SET_DSYN:         0xA8,
   AUDIO_STREAM:     0xF0,
 };
 const MSG = {
@@ -280,6 +285,7 @@ const MSG = {
   SYNTH_PARAMS:  0x0E,
   AUDIO_DROPPED: 0x0F,
   SETTINGS:      0x0B,
+  DSYN_ROW:      0x10,
 };
 
 let ws = null;
@@ -309,6 +315,7 @@ function handleMsg(dv, len) {
     case MSG.FULL_STATE: decodeFullState(dv, len); renderSong(); renderTopBar(); break;
     case MSG.LANE_UPDATE: decodeLane(dv, len); renderSong(); break;
     case MSG.DRUM_STEP:   decodeDrumStep(dv, len); renderDrumGrid(); break;
+    case MSG.DSYN_ROW:    decodeDsynRow(dv, len); renderDsyn(); break;
     case MSG.FX_UPDATE:   decodeFxChain(dv, len); renderFxChain(); break;
     case MSG.NOTE_EVENT:  decodeNoteEvent(dv, len); if (document.getElementById('s-roll').classList.contains('active')) renderPianoRoll(); break;
     case MSG.CLOCK_UPDATE: decodeClock(dv, len); break;
@@ -575,8 +582,8 @@ function renderTopBar() {
 // ─────────────────────────────────────────────────────────────────────────────
 // SONG VIEW render
 // ─────────────────────────────────────────────────────────────────────────────
-const TYPE_NAMES = ['WAV', 'DRUM', 'SYNTH'];
-const TYPE_KEYS  = ['wav', 'drum', 'synth'];
+const TYPE_NAMES = ['WAV', 'DRUM', 'SYNTH', '808'];
+const TYPE_KEYS  = ['wav', 'drum', 'synth', 'dsyn'];
 
 function laneBarsLabel(loop_len) {
   if (!loop_len) return '—';
@@ -732,6 +739,11 @@ function selectLane(li) {
     document.getElementById('drum-lane-name').textContent = nm;
     nav('drum', document.querySelectorAll('.nav-tab')[1]);
     renderDrumGrid();
+  } else if (l.type === 3) {  // DRUMSYNTH (808)
+    document.getElementById('dsyn-lane-name').textContent = nm;
+    dsynSelRow = 0;
+    nav('dsyn', document.querySelectorAll('.nav-tab')[1]);
+    renderDsyn();
   } else if (l.type === 2) {  // SYNTH
     document.getElementById('roll-lane-name').textContent = nm;
     nav('roll', document.querySelectorAll('.nav-tab')[2]);
@@ -943,6 +955,155 @@ function renderDrumPlayhead() {
     renderDrumGrid();
   if (document.getElementById('s-roll').classList.contains('active'))
     renderPianoRoll();
+  dsynUpdatePlayhead();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 808 DRUM SYNTH editor
+// ─────────────────────────────────────────────────────────────────────────────
+const VOICE_NAMES = ['BD','SD','LT','MT','HT','LC','MC','HC','RS','CP','CB','CY','OH','CH','MA','CL'];
+const VOICE_LONG  = ['Bass Drum','Snare','Lo Tom','Mid Tom','Hi Tom','Lo Conga','Mid Conga',
+                     'Hi Conga','Rim Shot','Clap','Cowbell','Cymbal','Open Hat','Closed Hat',
+                     'Maracas','Claves'];
+const DSYN_KNOBS  = ['tune','decay','tone','snap','drive','level','pan'];
+let dsynSelRow = 0;
+
+function decodeDsynRow(dv, len) {
+  if (len < 162) return;
+  const li = dv.getUint8(1), ri = dv.getUint8(2);
+  const voice = dv.getUint8(3), sc = dv.getUint8(4), rc = dv.getUint8(5);
+  if (!state.dsyn[li]) state.dsyn[li] = { step_count: 16, row_count: 0, rows: [] };
+  const seq = state.dsyn[li];
+  seq.step_count = sc; seq.row_count = rc;
+  if (seq.rows.length > rc) seq.rows.length = rc;
+  while (seq.rows.length <= ri)
+    seq.rows.push({ voice: 0, knobs: [0,0,0,0,0,0,0],
+                    steps: new Array(64).fill(0), accents: new Array(64).fill(0) });
+  const row = seq.rows[ri];
+  row.voice = voice;
+  for (let k = 0; k < 7; k++) row.knobs[k] = dv.getFloat32(6 + k * 4, true);
+  for (let s = 0; s < 64; s++) { row.steps[s] = dv.getUint8(34 + s); row.accents[s] = dv.getUint8(98 + s); }
+}
+
+function renderDsyn() {
+  if (selected_lane < 0) return;
+  const seq = state.dsyn[selected_lane];
+  const root = document.getElementById('dsyn-root');
+  if (!seq || !root) return;
+  const ssel = document.getElementById('dsyn-steps-sel');
+  if (ssel && ssel.value !== String(seq.step_count)) ssel.value = seq.step_count;
+  if (dsynSelRow >= seq.rows.length) dsynSelRow = 0;
+
+  let html = '<div class="dsyn-grid">';
+  seq.rows.forEach((row, ri) => {
+    html += `<div class="dsyn-row${ri === dsynSelRow ? ' sel' : ''}">`;
+    html += `<div class="dsyn-rowlabel" onclick="dsynSelectRow(${ri})">` +
+            `<button class="dsyn-play" onclick="event.stopPropagation();sendDsynTrigger(${ri})">▶</button>` +
+            `<span class="dsyn-vname">${VOICE_NAMES[row.voice] || '?'}</span></div>`;
+    html += '<div class="dsyn-steps">';
+    for (let s = 0; s < seq.step_count; s++) {
+      const vel = row.steps[s] || 0, acc = row.accents[s];
+      const cls = vel > 0 ? (acc ? 'on acc' : 'on') : '';
+      const beat = (s % 4 === 0) ? ' beat' : '';
+      const play = state.step[selected_lane] === s ? ' play' : '';
+      html += `<div class="dsyn-cell ${cls}${beat}${play}" data-si="${s}" onclick="dsynCellTap(${ri},${s})"></div>`;
+    }
+    html += '</div></div>';
+  });
+  html += '</div>';
+
+  const row = seq.rows[dsynSelRow];
+  if (row) {
+    html += '<div class="dsyn-knobs">';
+    html += `<div class="dsyn-voicesel"><label>VOICE ${dsynSelRow + 1}</label>` +
+            `<select onchange="sendDsynVoice(${dsynSelRow}, +this.value)">` +
+            VOICE_LONG.map((nm, i) =>
+              `<option value="${i}"${i === row.voice ? ' selected' : ''}>${VOICE_NAMES[i]} — ${nm}</option>`).join('') +
+            '</select></div>';
+    DSYN_KNOBS.forEach((kn, ki) => {
+      const isPan = ki === 6;
+      const min = isPan ? -100 : 0;
+      const val = Math.round(row.knobs[ki] * 100);
+      html += `<div class="dsyn-knob"><label>${kn.toUpperCase()}</label>` +
+              `<input type="range" min="${min}" max="100" value="${val}" ` +
+              `oninput="sendDsynKnob(${dsynSelRow},${ki},this.value/100,this)">` +
+              `<span class="dsyn-kv">${val}</span></div>`;
+    });
+    html += `<div class="dsyn-rowbtns">` +
+            `<button class="btn" onclick="sendDsynClearRow(${dsynSelRow})">CLEAR</button>` +
+            `<button class="btn" onclick="sendDsynDelRow(${dsynSelRow})">DEL VOICE</button></div>`;
+    html += '</div>';
+  }
+  root.innerHTML = html;
+}
+
+function dsynUpdatePlayhead() {
+  if (selected_lane < 0 || !state.dsyn[selected_lane]) return;
+  const root = document.getElementById('dsyn-root');
+  if (!root || !root.firstChild) return;
+  root.querySelectorAll('.dsyn-cell.play').forEach(c => c.classList.remove('play'));
+  const cur = state.step[selected_lane];
+  if (cur == null || cur >= 64) return;
+  root.querySelectorAll(`.dsyn-cell[data-si="${cur}"]`).forEach(c => c.classList.add('play'));
+}
+
+function dsynSelectRow(ri) { dsynSelRow = ri; renderDsyn(); }
+
+function dsynCellTap(ri, si) {
+  const seq = state.dsyn[selected_lane];
+  if (!seq || !seq.rows[ri]) return;
+  const row = seq.rows[ri];
+  const vel = row.steps[si] || 0, acc = row.accents[si];
+  let nv, na;                       // cycle: off → on → accent → off
+  if (vel === 0)      { nv = 100; na = 0; }
+  else if (!acc)      { nv = 100; na = 1; }
+  else                { nv = 0;   na = 0; }
+  sendDsynStep(ri, si, nv, na);
+}
+
+// ── Encoders (op codes match cmd_set_dsyn in ws_cmd.c) ──
+function sendDsynStep(ri, si, vel, acc) {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 0, ri, si, vel, acc ? 1 : 0]).buffer);
+}
+function sendDsynKnob(ri, ki, val, el) {
+  if (el && el.nextElementSibling) el.nextElementSibling.textContent = Math.round(val * 100);
+  if (selected_lane < 0) return;
+  const buf = new ArrayBuffer(9), dv = new DataView(buf);
+  dv.setUint8(0, CMD.SET_DSYN); dv.setUint8(1, selected_lane); dv.setUint8(2, 1);
+  dv.setUint8(3, ri); dv.setUint8(4, ki); dv.setFloat32(5, val, true);
+  wsSend(buf);
+}
+function sendDsynVoice(ri, voice) {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 2, ri, voice]).buffer);
+}
+function openDsynAddRow() {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 3, 13]).buffer); // default = closed hat
+}
+function sendDsynDelRow(ri) {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 4, ri]).buffer);
+}
+function sendDsynStepCount(sc) {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 5, sc]).buffer);
+}
+function sendDsynTrigger(ri) {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 6, ri, 110]).buffer);
+}
+function sendDsynClearRow(ri) {
+  if (selected_lane < 0) return;
+  wsSend(new Uint8Array([CMD.SET_DSYN, selected_lane, 7, ri]).buffer);
+}
+function sendDsynAccent(g) {
+  if (selected_lane < 0) return;
+  const buf = new ArrayBuffer(7), dv = new DataView(buf);
+  dv.setUint8(0, CMD.SET_DSYN); dv.setUint8(1, selected_lane); dv.setUint8(2, 8);
+  dv.setFloat32(3, g, true);
+  wsSend(buf);
 }
 
 // Drum grid tap (double-tap=accent, long-press=velocity slider)
@@ -1700,10 +1861,16 @@ const FX_TYPE_NAMES = [
   'SIDECHAIN COMP', 'TRANCE GATE', 'ARP DELAY',
 ];
 
+// Enumerated (discrete) params rendered as a dropdown instead of a slider.
+// Key is "type:paramIndex"; value is the list of option labels (value = index).
+const FX_PARAM_ENUMS = {
+  '1:2': ['Lowpass', 'Highpass', 'Bandpass', 'Notch'],   // FILTER mode
+};
+
 // Per-type param descriptors: [{label, min, max, step, decimals}]
 // Only first 8 params serialised; unlisted params show generic sliders.
 const FX_PARAMS = {
-  1:  [['CUTOFF Hz',0,20000,1,0],['RESONANCE',0,4,0.01,2],['MODE (LP/HP/BP/NT)',0,3,1,0]],
+  1:  [['CUTOFF Hz',0,20000,1,0],['RESONANCE',0,4,0.01,2],['MODE',0,3,1,0]],
   2:  [['LOW dB',-18,18,0.1,1],['MID dB',-18,18,0.1,1],['HI dB',-18,18,0.1,1],['MID Hz',200,8000,1,0],['MID Q',0.1,8,0.1,1]],
   3:  [['BAND',0,4,1,0],['GAIN dB',-18,18,0.1,1],['FREQ Hz',20,20000,1,0],['Q',0.1,8,0.1,1],['TYPE pk/ls/hs',0,2,1,0],['EN',0,1,1,0]],
   4:  [['THRESH dB',-60,0,0.5,1],['RATIO',1,20,0.1,1],['ATK ms',1,300,1,0],['REL ms',10,2000,1,0],['MAKEUP dB',0,24,0.5,1]],
@@ -1824,11 +1991,21 @@ function renderFxChain() {
           const val = fx.params[pi] !== undefined ? fx.params[pi] : 0;
           const pr = document.createElement('div');
           pr.className = 'fx-param-row';
-          pr.innerHTML =
-            `<span class="fx-param-label">${label}</span>` +
-            `<input type="range" min="${mn}" max="${mx}" step="${step}" value="${val}"` +
-            ` oninput="fxParamInput(${fx.slot},${pi},this.value,${dec},this)">` +
-            `<span class="fx-param-val" id="fxpv-${fx.slot}-${pi}">${(+val).toFixed(dec)}</span>`;
+          const enumLabels = FX_PARAM_ENUMS[fx.type + ':' + pi];
+          if (enumLabels) {
+            const sel = Math.round(val);
+            const opts = enumLabels.map((t, vi) =>
+              `<option value="${vi}"${vi === sel ? ' selected' : ''}>${t}</option>`).join('');
+            pr.innerHTML =
+              `<span class="fx-param-label">${label}</span>` +
+              `<select class="fx-param-sel" onchange="fxParamSelect(${fx.slot},${pi},this.value)">${opts}</select>`;
+          } else {
+            pr.innerHTML =
+              `<span class="fx-param-label">${label}</span>` +
+              `<input type="range" min="${mn}" max="${mx}" step="${step}" value="${val}"` +
+              ` oninput="fxParamInput(${fx.slot},${pi},this.value,${dec},this)">` +
+              `<span class="fx-param-val" id="fxpv-${fx.slot}-${pi}">${(+val).toFixed(dec)}</span>`;
+          }
           panel.appendChild(pr);
         });
       }
@@ -1867,6 +2044,15 @@ function fxParamInput(slot, paramIdx, rawVal, dec, inputEl) {
   const label = document.getElementById('fxpv-' + slot + '-' + paramIdx);
   if (label) label.textContent = val.toFixed(dec);
   // Update local state
+  const chain = state.fx[fxLaneIdx] || [];
+  const fx = chain.find(f => f.slot === slot);
+  if (fx) fx.params[paramIdx] = val;
+  fxSendParams(slot);
+}
+
+// Discrete/enumerated param change (dropdown) — e.g. filter mode.
+function fxParamSelect(slot, paramIdx, rawVal) {
+  const val = parseFloat(rawVal);
   const chain = state.fx[fxLaneIdx] || [];
   const fx = chain.find(f => f.slot === slot);
   if (fx) fx.params[paramIdx] = val;
@@ -1924,18 +2110,21 @@ function openFxPicker() {
   if (title) title.textContent = fxPickReplace ? 'CHANGE EFFECT' : 'CHOOSE EFFECT';
   const list = document.getElementById('fx-pick-list');
   list.innerHTML = '';
-  FX_TYPE_NAMES.forEach((name, typeId) => {
-    if (typeId === 0) return; // skip NONE
-    const div = document.createElement('div');
-    div.className = 'fx-pick-item';
-    div.textContent = name;
-    div.onclick = () => {
-      closeFxPicker();
-      if (fxPickReplace) fxReplace(fxPickSlot, typeId);
-      else               fxInsert(fxPickSlot, typeId);
-    };
-    list.appendChild(div);
-  });
+  FX_TYPE_NAMES
+    .map((name, typeId) => ({ name, typeId }))
+    .filter(o => o.typeId !== 0)            // skip NONE
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach(({ name, typeId }) => {
+      const div = document.createElement('div');
+      div.className = 'fx-pick-item';
+      div.textContent = name;
+      div.onclick = () => {
+        closeFxPicker();
+        if (fxPickReplace) fxReplace(fxPickSlot, typeId);
+        else               fxInsert(fxPickSlot, typeId);
+      };
+      list.appendChild(div);
+    });
   document.getElementById('fx-picker').classList.add('open');
 }
 
@@ -2808,6 +2997,27 @@ function renderLive() {
           e.preventDefault();
           pad.classList.add('active');
           wsSend(new Uint8Array([CMD.DRUM_TRIGGER, l.idx, ri, 100]).buffer);
+        });
+        pad.addEventListener('pointerup', () => pad.classList.remove('active'));
+        pad.addEventListener('pointerleave', () => pad.classList.remove('active'));
+        padRow.appendChild(pad);
+      }
+      wrap.appendChild(padRow);
+    } else if (l.type === 3) {
+      // 808 DRUM SYNTH: pad buttons per voice
+      const padRow = document.createElement('div');
+      padRow.className = 'live-pads';
+      const seq = state.dsyn[l.idx];
+      const rows = seq ? seq.rows : [];
+      const nrows = Math.max(rows.length, 1);
+      for (let ri = 0; ri < nrows; ri++) {
+        const pad = document.createElement('div');
+        pad.className = 'live-pad';
+        pad.textContent = rows[ri] ? (VOICE_NAMES[rows[ri].voice] || `R${ri+1}`) : `R${ri+1}`;
+        pad.addEventListener('pointerdown', e => {
+          e.preventDefault();
+          pad.classList.add('active');
+          wsSend(new Uint8Array([CMD.SET_DSYN, l.idx, 6, ri, 110]).buffer);
         });
         pad.addEventListener('pointerup', () => pad.classList.remove('active'));
         pad.addEventListener('pointerleave', () => pad.classList.remove('active'));

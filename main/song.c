@@ -185,6 +185,33 @@ static void save_drum_seq(wr_t *w, const drum_seq_t *seq)
     wr_str(w, "        ]}");
 }
 
+/* ── Drum synth (808) ─────────────────────────────────────────────────── */
+static void save_dsyn(wr_t *w, const dsyn_t *ds)
+{
+    wr_fmt(w, "      \"dsyn\": {\"step_count\": %d, \"accent_gain\": %.3f, "
+              "\"row_count\": %d,\n",
+           (int)ds->step_count, (double)ds->accent_gain, (int)ds->row_count);
+    wr_str(w, "        \"rows\": [\n");
+    for (int r = 0; r < ds->row_count; r++) {
+        const dsyn_params_t *p = &ds->params[r];
+        wr_str(w, "          {");
+        wr_fmt(w, "\"voice\": %d, \"tune\": %.3f, \"decay\": %.3f, \"tone\": %.3f, "
+                  "\"snap\": %.3f, \"drive\": %.3f, \"level\": %.3f, \"pan\": %.3f,\n",
+               (int)p->type, (double)p->tune, (double)p->decay, (double)p->tone,
+               (double)p->snap, (double)p->drive, (double)p->level, (double)p->pan);
+        wr_str(w, "           \"steps\": [");
+        for (int s = 0; s < ds->step_count; s++) {
+            wr_fmt(w, "[%d,%d]%s",
+                   (int)ds->steps[r][s].velocity,
+                   ds->steps[r][s].accent ? 1 : 0,
+                   (s < ds->step_count - 1) ? "," : "");
+        }
+        wr_str(w, "]}");
+        wr_str(w, (r < ds->row_count - 1) ? ",\n" : "\n");
+    }
+    wr_str(w, "        ]}");
+}
+
 /* ── Piano roll ───────────────────────────────────────────────────────── */
 static void save_piano_roll(wr_t *w, const piano_roll_t *pr)
 {
@@ -239,6 +266,9 @@ static void save_lane(wr_t *w, const lane_t *lane, int idx)
         wr_str(w, ",\n");
     } else if (lane->type == LANE_TYPE_DRUM && lane->drum_seq) {
         save_drum_seq(w, lane->drum_seq);
+        wr_str(w, ",\n");
+    } else if (lane->type == LANE_TYPE_DRUMSYNTH && lane->dsyn) {
+        save_dsyn(w, lane->dsyn);
         wr_str(w, ",\n");
     }
 
@@ -596,6 +626,71 @@ static int load_drum_seq(const rd_t *rd, int i, lane_t *lane)
     return i;
 }
 
+/* ── Load drum synth (808) ────────────────────────────────────────────── */
+static int load_dsyn(const rd_t *rd, int i, lane_t *lane)
+{
+    if (rd->t[i].type != JSMN_OBJECT) return skip_token(rd, i);
+
+    dsyn_t *ds = dsyn_alloc();
+    if (!ds) return skip_token(rd, i);
+    /* dsyn_alloc seeds a default kit + pattern; wipe it so the saved state is
+     * authoritative (otherwise leftover seed steps bleed through). */
+    memset(ds->steps, 0, sizeof(ds->steps));
+    ds->row_count = 0;
+
+    int ch = rd->t[i].size; i++;
+    for (int c = 0; c < ch; c++) {
+        if (rd_key_eq(rd, i, "step_count")) {
+            ds->step_count = (uint8_t)rd_int(rd, i+1); i+=2;
+        } else if (rd_key_eq(rd, i, "accent_gain")) {
+            ds->accent_gain = rd_float(rd, i+1); i+=2;
+        } else if (rd_key_eq(rd, i, "row_count")) {
+            ds->row_count = (uint8_t)rd_int(rd, i+1); i+=2;
+        } else if (rd_key_eq(rd, i, "rows")) {
+            i++; /* key → array */
+            int row_arr_count = rd->t[i].size; i++;
+            for (int r = 0; r < row_arr_count && r < DSYN_MAX_ROWS; r++) {
+                if (rd->t[i].type != JSMN_OBJECT) { i = skip_token(rd, i); continue; }
+                dsyn_params_t *p = &ds->params[r];
+                p->level = 0.85f;   /* default in case key missing */
+                int rch = rd->t[i].size; i++;
+                for (int rc = 0; rc < rch; rc++) {
+                    if      (rd_key_eq(rd, i, "voice")) { p->type  = (dsyn_voice_t)rd_int(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "tune"))  { p->tune  = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "decay")) { p->decay = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "tone"))  { p->tone  = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "snap"))  { p->snap  = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "drive")) { p->drive = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "level")) { p->level = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "pan"))   { p->pan   = rd_float(rd, i+1); i+=2; }
+                    else if (rd_key_eq(rd, i, "steps")) {
+                        i++; /* key → array */
+                        int sc = rd->t[i].size; i++;
+                        for (int s = 0; s < sc && s < DSYN_MAX_STEPS; s++) {
+                            if (rd->t[i].type == JSMN_ARRAY && rd->t[i].size >= 2) {
+                                ds->steps[r][s].velocity    = (uint8_t)rd_int(rd, i+1);
+                                ds->steps[r][s].accent      = (bool)rd_int(rd, i+2);
+                                ds->steps[r][s].probability = 100;
+                            }
+                            i = skip_token(rd, i);
+                        }
+                    } else { i++; i = skip_token(rd, i); }
+                }
+                /* Seed the per-row noise generator so the voice isn't silent. */
+                ds->state[r].lfsr = 0x2545F491u + (uint32_t)r * 0x9e3779b9u;
+                if (r + 1 > ds->row_count) ds->row_count = (uint8_t)(r + 1);
+            }
+        } else { i++; i = skip_token(rd, i); }
+    }
+
+    if (ds->step_count == 0)  ds->step_count  = 16;
+    if (ds->accent_gain == 0.0f) ds->accent_gain = 1.5f;
+    lane->dsyn = ds;
+    dsyn_update_timing(ds, lane->loop_len_ticks);
+    dsyn_reset(ds, lane->lane_tick);
+    return i;
+}
+
 /* ── Load one lane object ─────────────────────────────────────────────── */
 static int load_lane(const rd_t *rd, int i, song_t *song)
 {
@@ -656,6 +751,8 @@ static int load_lane(const rd_t *rd, int i, song_t *song)
             i++; i = load_arp(rd, i, &lane->arp);
         } else if (rd_key_eq(rd, i, "drum")) {
             i++; i = load_drum_seq(rd, i, lane);
+        } else if (rd_key_eq(rd, i, "dsyn")) {
+            i++; i = load_dsyn(rd, i, lane);
         } else if (rd_key_eq(rd, i, "lfo")) {
             i++; i = load_lfo(rd, i, &lane->lfo);
         } else if (rd_key_eq(rd, i, "adsr")) {

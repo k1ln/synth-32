@@ -25,43 +25,45 @@
 static void fx_generic_free(fx_node_t *self) { heap_caps_free(self); }
 
 /* ── SVF biquad (shared across filter / EQ types) ────────────────────────── */
-typedef struct { float f, q, low, band; } svf_t;
+/* Topology-preserving transform (TPT) state-variable filter — unconditionally
+ * stable at ALL cutoff frequencies and resonances, unlike the older Chamberlin
+ * SVF which diverged above ~fs/6 (~8 kHz) and got stuck at NaN until reset.
+ * g,k = coefficients; a1..a3 derived; ic1,ic2 = integrator state. */
+typedef struct { float g, k, a1, a2, a3, ic1, ic2; } svf_t;
 
 static void svf_set(svf_t *s, float hz, float resonance)
 {
-    s->f = 2.0f * sinf((float)M_PI * hz / (float)SAMPLE_RATE);
-    if (s->f > 1.9f) s->f = 1.9f;
-    s->q = resonance > 0.01f ? 1.0f / resonance : 100.0f;
+    float nyq = 0.49f * (float)SAMPLE_RATE;     /* stay safely below Nyquist */
+    if (hz < 20.0f)  hz = 20.0f;
+    if (hz > nyq)    hz = nyq;
+    s->g  = tanf((float)M_PI * hz / (float)SAMPLE_RATE);
+    s->k  = resonance > 0.01f ? 1.0f / resonance : 100.0f;   /* k = 1/Q (damping) */
+    s->a1 = 1.0f / (1.0f + s->g * (s->g + s->k));
+    s->a2 = s->g * s->a1;
+    s->a3 = s->g * s->a2;
+}
+
+/* Advance one sample; returns band-pass (v1) and low-pass (v2) taps. */
+static inline void svf_advance(svf_t *s, float in, float *v1, float *v2)
+{
+    float v3 = in - s->ic2;
+    float a  = s->a1 * s->ic1 + s->a2 * v3;     /* band-pass */
+    float b  = s->ic2 + s->a2 * s->ic1 + s->a3 * v3;  /* low-pass */
+    s->ic1 = 2.0f * a - s->ic1;
+    s->ic2 = 2.0f * b - s->ic2;
+    /* Self-recover from any stray non-finite state (denormals, bad input). */
+    if (!isfinite(s->ic1) || !isfinite(s->ic2)) { s->ic1 = 0.0f; s->ic2 = 0.0f; }
+    *v1 = a; *v2 = b;
 }
 
 static inline float svf_tick_lp(svf_t *s, float in)
-{
-    s->low  += s->f * s->band;
-    float high = in - s->low - s->q * s->band;
-    s->band += s->f * high;
-    return s->low;
-}
+{ float v1, v2; svf_advance(s, in, &v1, &v2); return v2; }
 static inline float svf_tick_hp(svf_t *s, float in)
-{
-    s->low  += s->f * s->band;
-    float high = in - s->low - s->q * s->band;
-    s->band += s->f * high;
-    return high;
-}
+{ float v1, v2; svf_advance(s, in, &v1, &v2); return in - s->k * v1 - v2; }
 static inline float svf_tick_bp(svf_t *s, float in)
-{
-    s->low  += s->f * s->band;
-    float high = in - s->low - s->q * s->band;
-    s->band += s->f * high;
-    return s->band;
-}
+{ float v1, v2; svf_advance(s, in, &v1, &v2); return v1; }
 static inline float svf_tick_notch(svf_t *s, float in)
-{
-    s->low  += s->f * s->band;
-    float high = in - s->low - s->q * s->band;
-    s->band += s->f * high;
-    return s->low + high;
-}
+{ float v1, v2; svf_advance(s, in, &v1, &v2); return in - s->k * v1; }
 
 /* ── Lane ADSR ───────────────────────────────────────────────────────────── */
 void lane_adsr_init(lane_adsr_t *a, float atk_ms, float dcy_ms,
@@ -1137,7 +1139,7 @@ static void reverb_update(fx_reverb_t *s)
         s->comb_l[i].damp1 = damp; s->comb_l[i].damp2 = 1.0f - damp;
         s->comb_r[i].damp1 = damp; s->comb_r[i].damp2 = 1.0f - damp;
     }
-    float scale = 0.015f;
+    float scale = 3.0f;     /* Freeverb scalewet (NOT the 0.015 input fixedgain) */
     float wet   = s->mix * scale;
     s->wet1 = wet * (s->width / 2.0f + 0.5f);
     s->wet2 = wet * ((1.0f - s->width) / 2.0f);
@@ -1201,6 +1203,18 @@ static void reverb_set_param(fx_node_t *self, uint8_t id, float v)
     reverb_update(s);
 }
 
+/* Reverb delay lines are read/written every sample across 24 buffers. Keep
+ * them in fast internal SRAM so the audio task (core 1) does not contend for
+ * PSRAM bandwidth with the LCD framebuffer (PSRAM) during UI redraws — that
+ * contention caused audible slowdowns. Fall back to PSRAM if internal SRAM
+ * is exhausted (e.g. many simultaneous reverb instances). */
+static int16_t *rv_buf_alloc(int n)
+{
+    int16_t *p = (int16_t *)heap_caps_calloc((size_t)n, sizeof(int16_t), MALLOC_CAP_INTERNAL);
+    if (!p) p = (int16_t *)heap_caps_calloc((size_t)n, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    return p;
+}
+
 static void reverb_free(fx_node_t *self)
 {
     fx_reverb_t *s = (fx_reverb_t *)self;
@@ -1218,8 +1232,8 @@ fx_node_t *fx_reverb_new(float room, float damp, float mix)
     for (int i = 0; i < FV_NUMCOMBS; i++) {
         int lenl = (int)(fv_comb_sizes[i] * scale);
         int lenr = (int)((fv_comb_sizes[i] + FV_SPREAD) * scale);
-        s->comb_l[i].buf = (int16_t *)heap_caps_calloc((size_t)lenl, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        s->comb_r[i].buf = (int16_t *)heap_caps_calloc((size_t)lenr, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        s->comb_l[i].buf = rv_buf_alloc(lenl);
+        s->comb_r[i].buf = rv_buf_alloc(lenr);
         if (!s->comb_l[i].buf || !s->comb_r[i].buf) { reverb_free(&s->hdr); return NULL; }
         s->comb_l[i].len = lenl; s->comb_r[i].len = lenr;
         s->comb_l[i].damp2 = s->comb_r[i].damp2 = 1.0f;
@@ -1227,8 +1241,8 @@ fx_node_t *fx_reverb_new(float room, float damp, float mix)
     for (int i = 0; i < FV_NUMALLPASS; i++) {
         int lenl = (int)(fv_ap_sizes[i] * scale);
         int lenr = (int)((fv_ap_sizes[i] + FV_SPREAD) * scale);
-        s->ap_l[i].buf = (int16_t *)heap_caps_calloc((size_t)lenl, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        s->ap_r[i].buf = (int16_t *)heap_caps_calloc((size_t)lenr, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        s->ap_l[i].buf = rv_buf_alloc(lenl);
+        s->ap_r[i].buf = rv_buf_alloc(lenr);
         if (!s->ap_l[i].buf || !s->ap_r[i].buf) { reverb_free(&s->hdr); return NULL; }
         s->ap_l[i].len = lenl; s->ap_r[i].len = lenr;
         s->ap_l[i].feedback = s->ap_r[i].feedback = 0.5f;
@@ -3229,8 +3243,8 @@ fx_node_t *fx_freeze_reverb_new(void)
     for (int i = 0; i < FV_NUMCOMBS; i++) {
         int lenl = (int)(fv_comb_sizes[i] * scale);
         int lenr = (int)((fv_comb_sizes[i] + FV_SPREAD) * scale);
-        s->comb_l[i].buf = (int16_t *)heap_caps_calloc((size_t)lenl, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        s->comb_r[i].buf = (int16_t *)heap_caps_calloc((size_t)lenr, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        s->comb_l[i].buf = rv_buf_alloc(lenl);
+        s->comb_r[i].buf = rv_buf_alloc(lenr);
         if (!s->comb_l[i].buf || !s->comb_r[i].buf) { freverb_free(&s->hdr); return NULL; }
         s->comb_l[i].len = lenl; s->comb_r[i].len = lenr;
         s->comb_l[i].damp2 = s->comb_r[i].damp2 = 1.0f;
@@ -3238,8 +3252,8 @@ fx_node_t *fx_freeze_reverb_new(void)
     for (int i = 0; i < FV_NUMALLPASS; i++) {
         int lenl = (int)(fv_ap_sizes[i] * scale);
         int lenr = (int)((fv_ap_sizes[i] + FV_SPREAD) * scale);
-        s->ap_l[i].buf = (int16_t *)heap_caps_calloc((size_t)lenl, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        s->ap_r[i].buf = (int16_t *)heap_caps_calloc((size_t)lenr, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        s->ap_l[i].buf = rv_buf_alloc(lenl);
+        s->ap_r[i].buf = rv_buf_alloc(lenr);
         if (!s->ap_l[i].buf || !s->ap_r[i].buf) { freverb_free(&s->hdr); return NULL; }
         s->ap_l[i].len = lenl; s->ap_r[i].len = lenr;
         s->ap_l[i].feedback = s->ap_r[i].feedback = 0.5f;

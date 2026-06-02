@@ -175,6 +175,7 @@ section.active { display: block; }
 .lane-bar.drum  { background: var(--lime); }
 .lane-bar.synth { background: var(--cyan); }
 .lane-bar.wav   { background: var(--amber); }
+.lane-bar.dsyn  { background: var(--red); }
 .lane-name { font-family: var(--f-mono); font-size: 13px; color: var(--t1); min-width: 48px; flex-shrink: 0; }
 .lane-chip {
   font-family: var(--f-mono);
@@ -187,6 +188,54 @@ section.active { display: block; }
 .lane-chip.drum  { background: var(--lime-dim);  color: var(--lime); }
 .lane-chip.synth { background: var(--cyan-dim);  color: var(--cyan); }
 .lane-chip.wav   { background: var(--amber-dim); color: var(--amber); }
+.lane-chip.dsyn  { background: var(--red-dim);   color: var(--red); }
+
+/* ── 808 drum synth editor ─────────────────────────────────────────────── */
+.dsyn-grid { display: flex; flex-direction: column; gap: 4px; }
+.dsyn-row { display: flex; align-items: stretch; gap: 6px; }
+.dsyn-row.sel .dsyn-rowlabel { border-color: var(--red); }
+.dsyn-rowlabel {
+  display: flex; align-items: center; gap: 6px;
+  width: 84px; flex-shrink: 0; padding: 0 6px;
+  background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px;
+  cursor: pointer;
+}
+.dsyn-vname { font-family: var(--f-mono); font-size: 13px; color: var(--t0); font-weight: 700; }
+.dsyn-play {
+  width: 24px; height: 24px; flex-shrink: 0;
+  border: 1px solid var(--line-2); border-radius: 4px;
+  background: var(--bg-2); color: var(--red); font-size: 11px; cursor: pointer;
+}
+.dsyn-play:active { background: var(--red); color: #0A0A0A; }
+.dsyn-steps { display: flex; gap: 3px; flex: 1; min-height: 40px; }
+.dsyn-cell {
+  flex: 1; min-width: 16px; border-radius: 4px;
+  background: var(--bg-3); border: 1px solid transparent; cursor: pointer;
+}
+.dsyn-cell.beat { border-left: 2px solid var(--line-2); }
+.dsyn-cell.on   { background: var(--red); }
+.dsyn-cell.acc  { background: var(--amber); }
+.dsyn-cell.play { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.5); }
+
+.dsyn-knobs {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px 16px;
+  align-items: center;
+}
+.dsyn-voicesel { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+.dsyn-voicesel label, .dsyn-knob label {
+  font-family: var(--f-mono); font-size: 10px; letter-spacing: .1em; color: var(--t2);
+}
+.dsyn-voicesel select {
+  flex: 1; background: var(--bg-3); color: var(--t0);
+  border: 1px solid var(--line-2); border-radius: 6px; height: 34px; padding: 0 8px;
+  font-family: var(--f-mono); font-size: 12px;
+}
+.dsyn-knob { display: flex; flex-direction: column; gap: 4px; }
+.dsyn-knob input[type=range] { width: 100%; accent-color: var(--red); }
+.dsyn-kv { font-family: var(--f-mono); font-size: 11px; color: var(--t1); }
+.dsyn-rowbtns { grid-column: 1 / -1; display: flex; gap: 10px; }
+.dsyn-rowbtns .btn { flex: 1; }
 .lane-name-block { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex-shrink: 1; }
 .lane-label { font-family: var(--f-mono); font-size: 12px; color: var(--t0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90px; }
 .lane-loop-len { font-family: var(--f-mono); font-size: 10px; color: var(--t2); min-width: 36px; flex-shrink: 0; }
@@ -446,6 +495,17 @@ input[type=password] {
   min-width: 80px;
 }
 .fx-param-row input[type=range] { flex: 1; }
+.fx-param-sel {
+  flex: 1;
+  height: 32px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--t1);
+  background: var(--bg-4);
+  border: 1px solid var(--bg-3);
+  border-radius: 6px;
+  padding: 0 8px;
+}
 .fx-param-val {
   font-family: var(--f-mono);
   font-size: 11px;

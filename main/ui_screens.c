@@ -1309,6 +1309,46 @@ static const char *fx_short_name(int tid)
     return "?";
 }
 
+/* Discrete/enumerated FX params: return the option label for value v, or NULL
+ * if this param is a plain numeric slider. */
+const char *fx_param_enum_label(int tid, int pi, float v)
+{
+    if (tid == FX_TYPE_FILTER && pi == 2) {
+        static const char *m[] = { "Lowpass", "Highpass", "Bandpass", "Notch" };
+        int idx = (int)(v + 0.5f);
+        if (idx < 0) idx = 0;
+        if (idx > 3) idx = 3;
+        return m[idx];
+    }
+    return NULL;
+}
+
+/* Map a picker display position (0-based, NONE excluded) to an fx type id,
+ * ordered alphabetically by long name. Order is computed once. */
+int fx_type_for_display(int idx)
+{
+    static int  order[FX_TYPE_COUNT];
+    static bool built = false;
+    if (!built) {
+        int n = 0;
+        for (int t = 1; t < (int)FX_TYPE_COUNT; t++) order[n++] = t;
+        /* insertion sort by long name — small N, runs once */
+        for (int i = 1; i < n; i++) {
+            int key = order[i];
+            const char *kn = fx_long_name(key);
+            int j = i - 1;
+            while (j >= 0 && strcasecmp(fx_long_name(order[j]), kn) > 0) {
+                order[j + 1] = order[j];
+                j--;
+            }
+            order[j + 1] = key;
+        }
+        built = true;
+    }
+    if (idx < 0 || idx >= (int)FX_TYPE_COUNT - 1) return 0;
+    return order[idx];
+}
+
 /* Per-type, per-param descriptor: {label, min, max, decimals}. */
 typedef struct { const char *lbl; float mn, mx; int dec; } fx_pd_t;
 
@@ -1709,7 +1749,9 @@ void draw_fx_adsr_screen(void)
             gfx_fill_round_rect(thumb_x, track_y - 8, 24, track_h + 16, 6, C_T0);
             /* Value */
             char val_buf[24];
-            if (decimals <= 0) snprintf(val_buf, sizeof(val_buf), "%.0f", (double)pv);
+            const char *enum_lbl = fx_param_enum_label(tid, pi, pv);
+            if (enum_lbl)           snprintf(val_buf, sizeof(val_buf), "%s", enum_lbl);
+            else if (decimals <= 0) snprintf(val_buf, sizeof(val_buf), "%.0f", (double)pv);
             else if (decimals == 1) snprintf(val_buf, sizeof(val_buf), "%.1f", (double)pv);
             else                 snprintf(val_buf, sizeof(val_buf), "%.2f", (double)pv);
             gfx_draw_text(1140, ry + 6, val_buf, C_T0, C_BG2, 1);
@@ -1754,7 +1796,7 @@ void draw_fx_picker_overlay(void)
         for (int c = 0; c < cols; c++) {
             int idx = row * cols + c;
             if (idx >= total) break;
-            int tid = idx + 1;             /* skip NONE */
+            int tid = fx_type_for_display(idx);   /* alphabetical order */
             int ix = mx + 24 + c * item_w;
             int iy = grid_top + vr * item_h;
             gfx_fill_round_rect(ix + 4, iy + 4, item_w - 8, item_h - 8, 8, C_BG3);
